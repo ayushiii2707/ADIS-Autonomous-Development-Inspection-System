@@ -8,8 +8,9 @@ import { createServer } from "node:http";
 import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { loadScanKeys } from "./scan-keys.mjs";
 
 const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
 if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 9)) {
@@ -166,6 +167,15 @@ export async function resolveCredentialKey({ envValue, keyPath, database }) {
 
 export const MAX_BODY_BYTES = 1024 * 1024;
 const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+// The security-audit worker runs in Docker and reaches this app as host.docker.internal.
+// That host name is accepted only on the worker's own authenticated paths, which also
+// get larger body limits for scanner outputs and the PDF report.
+const WORKER_HOST = "host.docker.internal";
+const WORKER_PATH_LIMITS = [
+  [/^\/adis-scan-artifacts\//, 512 * 1024 * 1024],
+  [/^\/scan-worker\//, 64 * 1024 * 1024],
+];
+const workerPathLimit = (url) => WORKER_PATH_LIMITS.find(([pattern]) => pattern.test(String(url || "").split("?")[0]))?.[1] || 0;
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -185,24 +195,51 @@ function requestHost(req, allowed) {
   const host = String(req.headers.host || "").trim().toLowerCase();
   let hostname = "";
   try { hostname = new URL(`http://${host}`).hostname; } catch {}
-  if (!hostname || !allowed.has(hostname)) throw new HttpError(403, "This server only answers requests addressed to an allowed host name.");
+  const workerRequest = hostname === WORKER_HOST && workerPathLimit(req.url) > 0;
+  if (!hostname || (!allowed.has(hostname) && !workerRequest)) throw new HttpError(403, "This server only answers requests addressed to an allowed host name.");
   return host;
 }
 
-async function readBody(req) {
+async function readBody(req, limit = MAX_BODY_BYTES) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw new HttpError(413, `Request bodies are limited to ${MAX_BODY_BYTES} bytes.`);
+    if (size > limit) throw new HttpError(413, `Request bodies are limited to ${limit} bytes.`);
     chunks.push(chunk);
   }
   return chunks.length ? Buffer.concat(chunks) : undefined;
 }
 
+// Files the security-audit worker uploads (report PDF, scanner outputs, findings
+// register), kept next to the database. Keys are validated by the app before use;
+// the resolved path must also stay inside the store directory.
+function createArtifactStore(root) {
+  const pathFor = (key) => {
+    const target = resolve(root, key);
+    if (!target.startsWith(root + sep)) throw new Error("Artifact key escapes the store.");
+    return target;
+  };
+  return {
+    async put(key, body) {
+      const target = pathFor(key);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, body, { mode: 0o600 });
+    },
+    async get(key) {
+      try {
+        return { body: await readFile(pathFor(key)) };
+      } catch (error) {
+        if (error.code === "ENOENT" || error.code === "EISDIR") return null;
+        throw error;
+      }
+    },
+  };
+}
+
 async function requestFromNode(req, allowed) {
   const host = requestHost(req, allowed);
-  const body = await readBody(req);
+  const body = await readBody(req, workerPathLimit(req.url) || MAX_BODY_BYTES);
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
     if (Array.isArray(value)) value.forEach((entry) => headers.append(name, entry));
@@ -242,6 +279,11 @@ export async function startLocalBackend({
     const credentialKey = await resolveCredentialKey({ envValue: appEnv.CREDENTIAL_ENCRYPTION_KEY, keyPath, database: sqlite });
     appEnv.CREDENTIAL_ENCRYPTION_KEY = credentialKey.key;
     appEnv.DB = new SQLiteDatabaseAdapter(sqlite);
+    const scanKeys = await loadScanKeys(dirname(databasePath));
+    appEnv.SCAN_DISPATCH_PRIVATE_KEY = scanKeys.privatePem;
+    appEnv.SCAN_DISPATCH_PUBLIC_KEY = scanKeys.publicPem;
+    appEnv.SCAN_STORAGE = scanKeys.storage;
+    appEnv.SCAN_STORE = createArtifactStore(resolve(dirname(databasePath), "scan-artifacts"));
     const allowed = allowedHostnames(appEnv);
     if (!["0.0.0.0", "::", "::1", ...LOOPBACK_HOSTS].includes(host)) allowed.add(host.toLowerCase());
     server = createServer(async (req, res) => {

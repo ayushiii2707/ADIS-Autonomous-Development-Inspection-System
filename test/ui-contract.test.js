@@ -48,10 +48,21 @@ test("navigation exposes the two starting paths and the compact sidebar", async 
   assert.ok(page.includes("async function goDiscover()"));
 });
 
-test("the page shows no hardcoded person or unavailable scan action", async () => {
+test("saving setup always sends the connected repository, and a failed branch save is reported", async () => {
+  const page = await servedPage();
+  // A stale connection_id:null in state.setup must not override the connected repository.
+  assert.ok(page.includes("body:JSON.stringify({...state.setup,connection_id:state.connection?.id||state.setup.connection_id||null,...patch})"));
+  assert.match(page, /async function saveBranch\(branch\)\{[^}]*try\{await saveSetup\(\{selected_branch:branch\}\)/);
+  assert.ok(page.includes("catch(error){state.setup.selected_branch=null;if(button)button.disabled=true;notify(error.message,false)}"));
+});
+
+test("the page shows no hardcoded person, and scanning opens the Operate page", async () => {
   const page = await servedPage();
   assert.doesNotMatch(page, /ayushi|TEST-A/i);
   assert.doesNotMatch(page, />Run scan</);
-  assert.ok(page.includes("Scanning not available yet"));
+  assert.ok(!page.includes("Scanning not available yet"));
+  assert.ok(page.includes('onclick="startScan()">Run full scan</button>'), "the dashboard scan row starts a scan");
+  assert.ok(page.includes('onclick="goOperate()"><span class="side-icon">⌁</span><span class="side-label">Operate'), "Operate opens the scans page");
+  assert.ok(page.includes("async function startScan(){") && page.includes("await goOperate(data.run.id)"), "starting a scan redirects to Operate");
   assert.match(page, /const viewer=\{"name":"Local user","role":"Owner","workspace":"My workspace","initials":"LU"\}/);
 });

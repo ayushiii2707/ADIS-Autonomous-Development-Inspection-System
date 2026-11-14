@@ -11,6 +11,11 @@
     "build": "bash scripts/build.sh",
     "validate": "node --disable-warning=ExperimentalWarning scripts/validate-artifact.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
-    "test:integration": "node --disable-warning=ExperimentalWarning --test test/*.integration.test.js"
+    "test:integration": "node --disable-warning=ExperimentalWarning --test test/*.integration.test.js",
+    "scan-worker:build": "node --env-file-if-exists=.env scripts/scan-worker.mjs build",
+    "scan-worker:start": "node --env-file-if-exists=.env scripts/scan-worker.mjs start",
+    "scan-worker:stop": "node --env-file-if-exists=.env scripts/scan-worker.mjs stop",
+    "scan-worker:status": "node --env-file-if-exists=.env scripts/scan-worker.mjs status",
+    "scan-worker:logs": "node --env-file-if-exists=.env scripts/scan-worker.mjs logs"
   }
 }
