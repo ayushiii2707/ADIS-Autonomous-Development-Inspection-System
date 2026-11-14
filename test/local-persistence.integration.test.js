@@ -187,7 +187,7 @@ test("existing application APIs persist complete local lifecycle across a backen
 
     const sqlite = new DatabaseSync(databasePath);
     sqlite.exec("PRAGMA foreign_keys = ON");
-    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 8);
+    assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 10);
     assert.deepEqual(sqlite.prepare("PRAGMA foreign_key_check").all(), []);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM projects").get().count, 1);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM idea_sessions").get().count, 1);
@@ -308,6 +308,6 @@ test("databases from earlier builds keep their migration history", async () => {
   sqlite = new DatabaseSync(databasePath);
   const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%migrations'").all().map((row) => row.name);
   assert.deepEqual(tables, ["schema_migrations"]);
-  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 8);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count, 10);
   sqlite.close();
 });
