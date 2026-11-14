@@ -64,5 +64,6 @@ test("the page shows no hardcoded person, and scanning opens the Operate page", 
   assert.ok(page.includes('onclick="startScan()">Run full scan</button>'), "the dashboard scan row starts a scan");
   assert.ok(page.includes('onclick="goOperate()"><span class="side-icon">⌁</span><span class="side-label">Operate'), "Operate opens the scans page");
   assert.ok(page.includes("async function startScan(){") && page.includes("await goOperate(data.run.id)"), "starting a scan redirects to Operate");
+  assert.ok(page.includes("<th>Assessment</th>") && page.includes("<th>Scanner level</th>") && !page.includes("item.scannerSeverity"), "findings show the report's assessment and the scanner level separately");
   assert.match(page, /const viewer=\{"name":"Local user","role":"Owner","workspace":"My workspace","initials":"LU"\}/);
 });

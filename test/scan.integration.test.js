@@ -100,6 +100,20 @@ async function createFakeWorker(dataDir, { outcome = "succeeded", busy = false }
       { id: "F-2", scanner: "trivy", ruleId: "CVE-2024-0001", filePath: "package-lock.json", startLine: 1, severity: "critical", message: "Vulnerable dependency.", fingerprint: "b" },
       { id: "F-3", scanner: "trufflehog", ruleId: "aws-key", filePath: "config.js", startLine: 3, severity: "medium", message: "Possible secret ([REDACTED]).", fingerprint: "c" },
     ] };
+    // The report in the pipeline's fixed section layout (assembly.md): F-2 is a confirmed
+    // critical finding card, F-1 a false-positive table row; F-3 is not discussed.
+    const report = [
+      "# Security Assessment Report", "## 5. Critical Findings", "### 5.1 Vulnerable dependency",
+      '<div class="finding-card">', "  <h4>Finding C1 — Vulnerable dependency</h4>",
+      '  <p class="meta"><strong>File:</strong> package-lock.json:1</p>', '  <p class="meta"><strong>Rule:</strong> CVE-2024-0001 · CRITICAL</p>', "</div>",
+      "## 6. High Findings", "There are no confirmed high-severity findings in this run.",
+      "## 7. Medium Findings", "There are no confirmed medium-severity findings in this run.",
+      "## 11. Infrastructure & Hardening Recommendations", "None.",
+      "## 12. False Positives", "### 12.1 Query building", "File | Line | Rule | Reason", "---|---:|---|---",
+      "`src/db.js` | 10-14 | js.sqli | Parameterised query; the value is bound, not concatenated.",
+      "`src/other.js` | 12 | js.sqli | Different file, must not match F-1.",
+      "## 13. Scanner Coverage Comparison", "CWE-89 | ✅ | ❌",
+    ].join("\n");
     // Like the real worker: the baseline snapshot is saved before the AI report step,
     // the findings register only on the success path.
     const baseline = { runId: job.runId, capturedAt: new Date().toISOString(), fingerprintVersion: 1, findings: [
@@ -111,9 +125,10 @@ async function createFakeWorker(dataDir, { outcome = "succeeded", busy = false }
     await upload(`security-baselines/${job.runId}.json`, Buffer.from(JSON.stringify(baseline)));
     if (worker.outcome === "succeeded") {
       await upload(`${prefix}/raw-outputs/findings-register.json`, Buffer.from(JSON.stringify(register)));
+      await upload(`${prefix}/raw-outputs/SECURITY_ASSESSMENT_REPORT.md`, Buffer.from(report));
       await upload(`${prefix}.pdf`, Buffer.from("%PDF-1.4 security report"));
       await callback(job, "/logs", { level: "info", stage: "upload", message: "Uploading PDF report." });
-      await callback(job, "/webhook", { status: "succeeded", s3Key: `${prefix}.pdf`, rawOutputFiles: [{ filename: "findings-register.json", s3Key: `${prefix}/raw-outputs/findings-register.json`, scannerKey: "register" }], coverageSummary: { languages: 2, gaps: 0 } });
+      await callback(job, "/webhook", { status: "succeeded", s3Key: `${prefix}.pdf`, rawOutputFiles: [{ filename: "findings-register.json", s3Key: `${prefix}/raw-outputs/findings-register.json`, scannerKey: "register" }, { filename: "SECURITY_ASSESSMENT_REPORT.md", s3Key: `${prefix}/raw-outputs/SECURITY_ASSESSMENT_REPORT.md`, scannerKey: "report" }], coverageSummary: { languages: 2, gaps: 0 } });
     } else {
       // As in a real run: report stage starts, fails, then raw outputs are still uploaded.
       await callback(job, "/logs", { level: "info", stage: "claude", message: "Starting report assembly and PDF generation via openai-codex." });
@@ -194,7 +209,12 @@ test("a GitHub scan verifies access, runs on the worker, and stores findings and
     assert.equal(detail.run.status, "succeeded", JSON.stringify(detail));
     assert.equal(detail.run.stage, "complete");
     assert.equal(detail.run.findings_count, 3);
-    assert.deepEqual(detail.run.severity_counts, { critical: 1, high: 1, medium: 1, low: 0, info: 0 });
+    // Severity is the report's assessment, not the scanner's level: F-1 was flagged "high" by
+    // its scanner but the report dismissed it, so it is counted as a false positive.
+    assert.deepEqual(detail.run.severity_counts, { assessed: true, counts: { critical: 1, high: 0, medium: 0, low: 0, hardening: 0, "false-positive": 1, "not-in-report": 1 } });
+    const assessed = (await call(`/api/projects/${projectId}/scans/${detail.run.id}/findings`)).body;
+    assert.equal(assessed.assessed, true);
+    assert.deepEqual(assessed.findings.map((item) => `${item.id}:${item.level}->${item.assessment}`), ["F-1:high->false-positive", "F-2:critical->critical", "F-3:medium->not-in-report"]);
     assert.equal(detail.run.report_available, true);
     const stages = detail.logs.map((log) => log.stage);
     assert.ok(stages.includes("verify") && stages.includes("clone") && stages.includes("complete"));
@@ -295,12 +315,14 @@ test("a failed pipeline run still exposes the findings it produced", async () =>
     assert.equal(detail.run.error, "openai-codex stage codeql.md failed (exit 1): stream disconnected before completion: You have no credits remaining.");
     assert.equal(detail.run.stage, "claude", "the stage that failed, not the uploads after it");
     assert.equal(detail.run.report_available, false);
-    // No findings register on the failure path: the pipeline's baseline snapshot is used, with severities mapped.
+    // No findings register or report on the failure path: the baseline snapshot is shown,
+    // unassessed, with the scanners' own levels (never relabelled as severities).
     assert.equal(detail.run.findings_count, 4);
-    assert.deepEqual(detail.run.severity_counts, { critical: 0, high: 1, medium: 2, low: 1, info: 0 });
+    assert.deepEqual(detail.run.severity_counts, { assessed: false, counts: { warning: 2, note: 1, error: 1 } });
     const findings = (await call(`/api/projects/${projectId}/scans/${run.id}/findings`)).body;
     assert.equal(findings.source, "baseline");
-    assert.deepEqual(findings.findings.map((item) => `${item.scannerSeverity}->${item.severity}`), ["WARNING->medium", "note->low", "error->high", "warning->medium"]);
+    assert.equal(findings.assessed, false);
+    assert.deepEqual(findings.findings.map((item) => `${item.level}:${item.assessment ?? 'none'}`), ["warning:none", "note:none", "error:none", "warning:none"]);
     assert.equal((await call(`/api/projects/${projectId}/scans/${run.id}/report`)).status, 404);
   }, { workerOptions: { outcome: "failed" } });
 });
@@ -323,7 +345,21 @@ test("worker callbacks require the run's own signed token", async () => {
     assert.equal((await call(`/api/projects/${projectId}/scans/${first.runId}`)).body.run.status, "succeeded");
     // AI metering and prompt lookups answer like the reference control plane.
     const begin = await post("/scan-worker/hub/adis/ai-metering/begin", first.jobToken);
-    assert.match((await begin.json()).invocationId, /^[0-9a-f-]{36}$/);
+    const granted = await begin.json();
+    assert.match(granted.invocationId, /^[0-9a-f-]{36}$/);
+    assert.equal(granted.maxBudgetUsd, 2, "the default per-scan budget");
+    // Reported usage is tallied; once the estimate reaches the budget, further AI calls are refused.
+    assert.equal((await post(`/scan-worker/hub/adis/llm-invocations/${granted.invocationId}/finish`, first.jobToken, { inputTokens: 100000, cacheReadTokens: 400000, outputTokens: 50000, modelUsed: "gpt-5-mini" })).status, 200);
+    let usage = (await call(`/api/projects/${projectId}/scans/${first.runId}`)).body.run.ai_usage;
+    assert.deepEqual({ ...usage, cost_usd: Number(usage.cost_usd.toFixed(4)) }, { input_tokens: 100000, cached_tokens: 400000, output_tokens: 50000, cost_usd: 0.135, budget_usd: 2 });
+    await post(`/scan-worker/hub/adis/llm-invocations/x/finish`, first.jobToken, { inputTokens: 0, outputTokens: 200000, modelUsed: "gpt-5" });
+    const refused = await post("/scan-worker/hub/adis/ai-metering/begin", first.jobToken);
+    assert.equal(refused.status, 403);
+    const refusal = await refused.json();
+    assert.equal(refusal.governanceBlocked, true);
+    assert.match(refusal.message, /AI budget reached: .*\$2\.1[34] of its \$2\.00 limit/);
+    usage = (await call(`/api/projects/${projectId}/scans/${first.runId}`)).body.run.ai_usage;
+    assert.equal(Number(usage.cost_usd.toFixed(3)), 2.135);
     assert.equal((await nativeFetch(origin + "/scan-worker/hub/adis/prompts/assembly", { headers: { authorization: `Bearer ${first.jobToken}` } })).status, 404);
   });
 });

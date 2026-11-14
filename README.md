@@ -92,14 +92,14 @@ GitHub PATs and Bitbucket credential bundles are encrypted with AES-256-GCM usin
 1. **Verify** — the stored GitHub/Bitbucket credential is decrypted server-side and re-checked against the provider: authentication, access to the exact repository, and that the selected branch still exists. Nothing is dispatched if any check fails, and the error says which one.
 2. **Dispatch** — the app checks the worker is running and free, then sends it the job (repository URL, branch, git credential, scanners, AI provider) with a short-lived Ed25519-signed token. The worker refuses unsigned or mis-scoped jobs.
 3. **Run** — the worker clones the branch, runs its scanners (default: CodeQL, OpenGrep, Trivy, OSV-Scanner, TruffleHog), checks language coverage, merges and de-duplicates findings, and writes a PDF report with an AI model.
-4. **Results** — the worker reports progress and its final result to `/scan-worker/*` using the run's own signed token, and uploads the report and raw outputs to the app's built-in S3-compatible store (AWS Signature V4 verified), kept under `.data/scan-artifacts/`. The Operate page shows live stages and logs, the de-duplicated findings, and the PDF download. If the report step fails, the findings the scanners produced are still shown.
+4. **Results** — the worker reports progress and its final result to `/scan-worker/*` using the run's own signed token, and uploads the report and raw outputs to the app's built-in S3-compatible store (AWS Signature V4 verified), kept under `.data/scan-artifacts/`. The Operate page shows live stages and logs, the de-duplicated findings, the estimated AI cost, and the PDF download. Each finding shows the report's assessment (confirmed critical/high/medium/low, hardening, false positive, or not in report), taken from the report's fixed sections, so the page agrees with the PDF; the scanner's own level (for example SARIF `warning`) is shown separately and is not treated as a severity. If the report step fails, the scanners' findings are still shown, marked as not assessed.
 
 ### Running the worker
 
 Requirements: Docker Desktop (on Apple Silicon, turn on *Use Rosetta for x86_64/amd64 emulation*), about 25–30 GB free disk for the image, and an OpenAI (or Anthropic) API key for the report.
 
 ```bash
-npm run scan-worker:build   # once: builds the pipeline image (pinned commit); downloads several GB
+npm run scan-worker:build   # once: builds the pipeline image (pinned commit) plus an emoji font layer for the PDF; downloads several GB
 npm run scan-worker:start   # starts it on 127.0.0.1:4101, wired to this app
 npm run scan-worker:status  # / scan-worker:logs / scan-worker:stop
 ```
@@ -110,7 +110,8 @@ Then set `SCAN_AI_API_KEY` in `.env` and restart the app. Settings:
 | --- | --- | --- |
 | `SCAN_AI_API_KEY` | unset (scans are disabled) | Key for the pipeline's report step. |
 | `SCAN_AI_PROVIDER` | `openai-codex` | `openai-codex` or `anthropic-claude-code`. |
-| `SCAN_AI_MODEL` | pipeline default (`gpt-5`) | Report model. |
+| `SCAN_AI_MODEL` | pipeline default (`gpt-5`) | Report model. `gpt-5-mini` costs about a fifth as much. |
+| `SCAN_AI_BUDGET_USD` | `2` | Estimated AI spend allowed per scan. Each AI call reports its tokens; once the scan's estimated total reaches this, the app refuses further AI calls and the scan stops. One call already running can go past it. |
 | `SCAN_SCANNERS` | `codeql,opengrep,trivy,osv,trufflehog` | Comma-separated scanner keys. SonarQube, Dependency-Track, Nuclei, and ZAP need their own servers or a live URL and are recorded as skipped otherwise. |
 | `SCAN_WORKER_URL` | `http://127.0.0.1:4101` | Where the worker listens. |
 

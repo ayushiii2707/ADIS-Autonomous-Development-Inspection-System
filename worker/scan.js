@@ -20,8 +20,9 @@ const KNOWN_SCANNERS = ['codeql', 'opengrep', 'sonarqube', 'dependency-track', '
 const DEFAULT_SCANNERS = ['codeql', 'opengrep', 'trivy', 'osv', 'trufflehog'];
 const HEARTBEAT_TIMEOUT_MS = 10 * 60 * 1000;
 const RUN_TOKEN_TTL_S = 6 * 60 * 60;
+const DEFAULT_AI_BUDGET_USD = 2;
+const DEFAULT_OPENAI_MODEL = 'gpt-5';
 const STAGES = new Set(['verify', 'setup', 'clone', 'scan', 'coverage', 'claude', 'pdf', 'upload', 'complete', 'failed', 'cleanup']);
-const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'];
 
 const now = () => new Date().toISOString();
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
@@ -40,7 +41,23 @@ function scanConfig(env) {
     aiProvider: env.SCAN_AI_PROVIDER === 'anthropic-claude-code' ? 'anthropic-claude-code' : 'openai-codex',
     aiKey: String(env.SCAN_AI_API_KEY || '').trim(),
     aiModel: String(env.SCAN_AI_MODEL || '').trim(),
+    aiBudgetUsd: Number(env.SCAN_AI_BUDGET_USD) > 0 ? Number(env.SCAN_AI_BUDGET_USD) : DEFAULT_AI_BUDGET_USD,
   };
+}
+
+// USD per million tokens: [uncached input, cached input, output]. Unlisted models are
+// priced as the most expensive listed one so the budget errs on the safe side.
+const AI_PRICES = {
+  'gpt-5': [1.25, 0.125, 10], 'gpt-5-mini': [0.25, 0.025, 2], 'gpt-5-nano': [0.05, 0.005, 0.4],
+  'gpt-5-codex': [1.25, 0.125, 10], 'claude-sonnet-4-5': [3, 0.3, 15], 'claude-opus-4-1': [15, 1.5, 75],
+};
+const FALLBACK_PRICE = [15, 1.5, 75];
+
+export function estimateAiCostUsd(model, { inputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0, outputTokens = 0 } = {}) {
+  const key = String(model || '').toLowerCase().replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  const [input, cached, output] = AI_PRICES[key] || FALLBACK_PRICE;
+  const n = (value) => (Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : 0);
+  return (n(inputTokens) * input + n(cacheWriteTokens) * input + n(cacheReadTokens) * cached + n(outputTokens) * output) / 1e6;
 }
 
 // ---------- tokens (format verified by the worker's job-token-verify.ts) ----------
@@ -98,7 +115,8 @@ function publicRun(run) {
     id: run.id, provider: run.provider, repository: run.repository, branch: run.branch, status: run.status, stage: run.stage,
     scanners: parseJson(run.scanners_json, []), ai_provider: run.ai_provider, ai_model: run.ai_model,
     report_available: Boolean(run.report_key), findings_count: run.findings_count, severity_counts: parseJson(run.severity_counts_json, {}),
-    coverage_summary: parseJson(run.coverage_summary_json || 'null', null), raw_outputs: parseJson(run.raw_outputs_json, []).map((item) => ({ filename: item.filename, scanner: item.scannerKey })),
+    coverage_summary: parseJson(run.coverage_summary_json || 'null', null),
+    ai_usage: { input_tokens: run.ai_input_tokens || 0, cached_tokens: run.ai_cached_tokens || 0, output_tokens: run.ai_output_tokens || 0, cost_usd: Number(run.ai_cost_usd) || 0, budget_usd: run.ai_budget_usd ?? null }, raw_outputs: parseJson(run.raw_outputs_json, []).map((item) => ({ filename: item.filename, scanner: item.scannerKey })),
     error: run.error && run.error.includes('\n') ? summarizeWorkerError(run.error) : run.error, created_at: run.created_at, started_at: run.started_at, last_heartbeat_at: run.last_heartbeat_at, finished_at: run.finished_at,
   };
 }
@@ -173,8 +191,8 @@ export async function startScan(env, ctx, projectId, actorId) {
     ? `https://github.com/${encodeURIComponent(connection.owner)}/${encodeURIComponent(connection.repository)}.git`
     : `https://bitbucket.org/${encodeURIComponent(connection.owner)}/${encodeURIComponent(connection.repository)}.git`;
   await env.DB.batch([
-    env.DB.prepare('INSERT INTO security_scan_runs(id,project_id,connection_id,provider,repository,repo_url,branch,status,stage,scanners_json,ai_provider,ai_model,requested_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(runId, projectId, connection.id, connection.provider, label, repoUrl, setup.selected_branch, 'verifying', 'verify', JSON.stringify(config.scanners), config.aiProvider, config.aiModel || (config.aiProvider === 'openai-codex' ? 'gpt-5' : 'claude-haiku-5-5'), actorId || null, at, at),
+    env.DB.prepare('INSERT INTO security_scan_runs(id,project_id,connection_id,provider,repository,repo_url,branch,status,stage,scanners_json,ai_provider,ai_model,ai_budget_usd,requested_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(runId, projectId, connection.id, connection.provider, label, repoUrl, setup.selected_branch, 'verifying', 'verify', JSON.stringify(config.scanners), config.aiProvider, config.aiModel || (config.aiProvider === 'openai-codex' ? DEFAULT_OPENAI_MODEL : 'claude-haiku-5-5'), config.aiBudgetUsd, actorId || null, at, at),
     env.DB.prepare('INSERT INTO security_scan_logs(run_id,level,stage,message,created_at) VALUES(?,?,?,?,?)').bind(runId, 'info', 'verify', `Verifying the ${connection.provider === 'github' ? 'GitHub' : 'Bitbucket'} credential, access to ${label}, and branch "${setup.selected_branch}".`, at),
   ]);
 
@@ -245,16 +263,70 @@ function failedStage(logs, fallback) {
 
 // ---------- browser API ----------
 
-// Scanners report severity in their own vocabulary (SARIF error/warning/note,
-// OpenGrep ERROR/WARNING/INFO, CVSS-style critical/high/…). Map to one scale for
-// counting and filtering; the original value is kept on each finding.
-export function normalizeSeverity(raw) {
-  const value = String(raw || '').toLowerCase();
-  if (value === 'critical') return 'critical';
-  if (value === 'high' || value === 'error') return 'high';
-  if (value === 'medium' || value === 'moderate' || value === 'warning') return 'medium';
-  if (value === 'low' || value === 'note') return 'low';
-  return 'info';
+// A scanner's level (SARIF error/warning/note, OpenGrep WARNING) says how sure the rule
+// is, not how severe a vulnerability is. Severity is what the report decides after
+// reviewing each finding in the code, so findings carry the report's assessment and
+// the scanner's own level separately. Without a report they are shown as unassessed.
+export const ASSESSMENTS = ['critical', 'high', 'medium', 'low', 'hardening', 'false-positive', 'not-in-report'];
+const REPORT_SECTIONS = [
+  ['critical', 'Critical Findings'], ['high', 'High Findings'], ['medium', 'Medium Findings'], ['low', 'Low Findings'],
+  ['hardening', 'Infrastructure & Hardening'], ['false-positive', 'False Positives'],
+];
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function reportSection(markdown, title) {
+  const heading = new RegExp(`^##\\s+(?:\\d+\\.\\s*)?${escapeRegExp(title)}\\b.*$`, 'im');
+  const match = markdown.match(heading);
+  if (!match) return '';
+  const rest = markdown.slice(match.index + match[0].length);
+  const next = rest.search(/^##\s/m);
+  return next < 0 ? rest : rest.slice(0, next);
+}
+
+// Report units a finding can be matched against: each table row (False Positives lists
+// `File | Line | Rule | Reason`) and each `###` sub-section or finding card.
+function reportUnits(section) {
+  const rows = section.split('\n').filter((line) => (line.match(/\|/g) || []).length >= 3 && !/^\s*\|?\s*-{3}/.test(line) && !/^\s*\|?\s*File\s*\|/i.test(line)).map((text) => ({ text, row: true }));
+  const blocks = section.split(/^###\s|<div class="finding-card">/m).slice(1).map((text) => ({ text: text.split('\n').filter((line) => (line.match(/\|/g) || []).length < 3).join('\n'), row: false }));
+  return [...rows, ...blocks];
+}
+
+function mentionsRule(text, ruleId) {
+  const rule = String(ruleId || '');
+  if (!rule) return false;
+  const bounded = (token) => new RegExp(`(?<![\\w.-])${escapeRegExp(token)}(?![\\w.-])`).test(text);
+  if (bounded(rule)) return true;
+  const parts = rule.split('.');
+  for (let length = parts.length - 1; length >= 3; length -= 1) if (bounded(parts.slice(0, length).join('.'))) return true;
+  const last = parts.at(-1);
+  return parts.length > 1 && last.length >= 8 && bounded(last);
+}
+
+function rowCoversLine(text, line) {
+  const cells = text.split('|').map((cell) => cell.trim());
+  const spec = cells.find((cell) => /^\d+(\s*[-–]\s*\d+)?(\s*\(.*\))?$/.test(cell));
+  if (!spec || !line) return true;
+  const [from, to] = spec.match(/\d+/g).map(Number);
+  return line >= from && line <= (to ?? from);
+}
+
+export function assessFindings(markdown, entries) {
+  const report = String(markdown || '');
+  const knownFiles = [...new Set(entries.map((entry) => entry.filePath).filter(Boolean))];
+  const sections = REPORT_SECTIONS.map(([assessment, title]) => ({ assessment, units: reportUnits(reportSection(report, title)) }));
+  return entries.map((entry) => {
+    for (const { assessment, units } of sections) {
+      const hit = units.some(({ text, row }) => {
+        if (entry.id && new RegExp(`(?<![\\w-])${escapeRegExp(entry.id)}(?![\\w-])`).test(text)) return true;
+        if (!mentionsRule(text, entry.ruleId)) return false;
+        const namesFile = entry.filePath && text.includes(entry.filePath);
+        if (!namesFile && knownFiles.some((file) => text.includes(file))) return false;
+        return !row || rowCoversLine(text, Number(entry.startLine));
+      });
+      if (hit) return { ...entry, assessment };
+    }
+    return { ...entry, assessment: 'not-in-report' };
+  });
 }
 
 // The pipeline's de-duplicated findings register, written on its success path.
@@ -274,16 +346,23 @@ async function findingsFor(env, run) {
     entries = snapshotFindings;
     source = 'baseline';
   }
-  return {
-    source,
-    entries: entries.map((item) => ({ id: item.id || item.stableKey || item.fingerprint, scanner: item.scanner, ruleId: item.ruleId, filePath: item.filePath, startLine: item.startLine, severity: normalizeSeverity(item.severity), scannerSeverity: item.severity, message: item.message, fingerprint: item.fingerprint })),
-  };
+  const mapped = entries.map((item) => ({ id: item.id || item.stableKey || item.fingerprint, scanner: item.scanner, ruleId: item.ruleId, filePath: item.filePath, startLine: item.startLine, level: String(item.severity || 'unknown').toLowerCase(), message: item.message, fingerprint: item.fingerprint }));
+  const reportOutput = outputs.find((item) => item.filename === 'SECURITY_ASSESSMENT_REPORT.md');
+  const reportFile = reportOutput ? await env.SCAN_STORE.get(reportOutput.s3Key) : null;
+  if (!reportFile) return { source, assessed: false, entries: mapped };
+  return { source, assessed: true, entries: assessFindings(reportFile.body.toString('utf8'), mapped) };
 }
 
-function severityCounts(entries) {
-  const counts = Object.fromEntries(SEVERITIES.map((key) => [key, 0]));
-  for (const entry of entries) counts[normalizeSeverity(entry.severity)] += 1;
-  return counts;
+// Assessed runs count by the report's verdict; unassessed ones by the scanners' own levels.
+function severityCounts(found) {
+  if (!found.assessed) {
+    const counts = {};
+    for (const entry of found.entries) counts[entry.level] = (counts[entry.level] || 0) + 1;
+    return { assessed: false, counts };
+  }
+  const counts = Object.fromEntries(ASSESSMENTS.map((key) => [key, 0]));
+  for (const entry of found.entries) counts[entry.assessment] += 1;
+  return { assessed: true, counts };
 }
 
 // The worker's error text can include an AI agent's whole transcript; keep the
@@ -320,14 +399,14 @@ export async function scanRoute(req, env, path, method, ctx) {
     if (['succeeded', 'failed'].includes(run.status) && run.findings_count === null) {
       const found = await findingsFor(env, run);
       if (found) {
-        await env.DB.prepare('UPDATE security_scan_runs SET findings_count=?,severity_counts_json=? WHERE id=?').bind(found.entries.length, JSON.stringify(severityCounts(found.entries)), run.id).run();
-        run = { ...run, findings_count: found.entries.length, severity_counts_json: JSON.stringify(severityCounts(found.entries)) };
+        await env.DB.prepare('UPDATE security_scan_runs SET findings_count=?,severity_counts_json=? WHERE id=?').bind(found.entries.length, JSON.stringify(severityCounts(found)), run.id).run();
+        run = { ...run, findings_count: found.entries.length, severity_counts_json: JSON.stringify(severityCounts(found)) };
       }
     }
     if (base[3] === 'findings') {
       const found = await findingsFor(env, run);
       if (!found) return json({ error: 'No findings are available for this scan.' }, 404);
-      return json({ findings: found.entries.slice(0, 5000), total: found.entries.length, source: found.source, severity_counts: severityCounts(found.entries) });
+      return json({ findings: found.entries.slice(0, 5000), total: found.entries.length, source: found.source, ...severityCounts(found) });
     }
     if (base[3] === 'report') {
       const stored = run.report_key ? await env.SCAN_STORE.get(run.report_key) : null;
@@ -355,8 +434,34 @@ export async function handleScanWorker(req, env, path) {
   const rest = path.slice('/scan-worker'.length);
 
   // AI metering: the worker asks before each AI call and reports usage after. This app does not meter AI spend.
-  if (rest === '/hub/adis/ai-metering/begin') return json({ invocationId: randomUUID() });
-  if (rest.startsWith('/hub/adis/llm-invocations/') || rest === '/hub/adis/ai-governance/tool-usage') return json({ ok: true });
+  // This app does not bill AI spend, but it caps it: each call reports its token usage, the run
+  // keeps an estimated total, and once that reaches the run's budget no further call is allowed.
+  if (rest === '/hub/adis/ai-metering/begin') {
+    const budget = Number(run.ai_budget_usd) > 0 ? Number(run.ai_budget_usd) : null;
+    const spent = Number(run.ai_cost_usd) || 0;
+    if (budget !== null && spent >= budget) {
+      const message = `AI budget reached: this scan has used an estimated $${spent.toFixed(2)} of its $${budget.toFixed(2)} limit (SCAN_AI_BUDGET_USD), so no further AI call was made.`;
+      await addLog(env, run.id, 'warn', 'claude', message);
+      return json({ governanceBlocked: true, code: 'AI_BUDGET_REACHED', message }, 403);
+    }
+    return json({ invocationId: randomUUID(), ...(budget !== null ? { maxBudgetUsd: budget - spent } : {}) });
+  }
+  const usageMatch = rest.match(/^\/hub\/adis\/llm-invocations\/[^/]+\/([a-z_-]+)$/i);
+  if (usageMatch) {
+    const body = await req.json().catch(() => ({}));
+    const usage = { inputTokens: Number(body.inputTokens) || 0, cacheReadTokens: Number(body.cacheReadTokens) || 0, cacheWriteTokens: Number(body.cacheWriteTokens) || 0, outputTokens: Number(body.outputTokens) || 0 };
+    const model = String(body.modelUsed || run.ai_model || '');
+    const reported = Number(body.sdkTotalCostUsd);
+    const cost = Number.isFinite(reported) && reported > 0 ? reported : estimateAiCostUsd(model, usage);
+    if (usage.inputTokens || usage.cacheReadTokens || usage.outputTokens || cost) {
+      await env.DB.prepare('UPDATE security_scan_runs SET ai_input_tokens=ai_input_tokens+?, ai_cached_tokens=ai_cached_tokens+?, ai_output_tokens=ai_output_tokens+?, ai_cost_usd=ai_cost_usd+?, updated_at=? WHERE id=?')
+        .bind(usage.inputTokens + usage.cacheWriteTokens, usage.cacheReadTokens, usage.outputTokens, cost, now(), run.id).run();
+      const total = (Number(run.ai_cost_usd) || 0) + cost;
+      await addLog(env, run.id, 'info', 'claude', `AI call ${usageMatch[1]} (${model || 'unknown model'}): ${usage.inputTokens + usage.cacheWriteTokens} input, ${usage.cacheReadTokens} cached, ${usage.outputTokens} output tokens, about $${cost.toFixed(3)}; scan total about $${total.toFixed(2)}${run.ai_budget_usd ? ' of $' + Number(run.ai_budget_usd).toFixed(2) : ''}.`);
+    }
+    return json({ ok: true });
+  }
+  if (rest === '/hub/adis/ai-governance/tool-usage') return json({ ok: true });
   // No prompt overrides: the worker falls back to the prompts it ships with.
   if (rest.startsWith('/hub/adis/prompts/')) return json({ error: 'Not found.' }, 404);
 
@@ -384,7 +489,7 @@ export async function handleScanWorker(req, env, path) {
   const updated = { ...run, raw_outputs_json: JSON.stringify(rawOutputs) };
   const found = await findingsFor(env, updated).catch(() => null);
   const entries = found ? found.entries : null;
-  const counts = entries ? severityCounts(entries) : {};
+  const counts = found ? severityCounts(found) : {};
   const failure = summarizeWorkerError(body.error);
   const succeeded = body.status === 'succeeded';
   await env.DB.batch([

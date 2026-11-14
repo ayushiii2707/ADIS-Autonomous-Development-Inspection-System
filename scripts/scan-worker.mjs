@@ -21,6 +21,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PIPELINE_REPO = "https://github.com/ayushiii2707/security-audit-pipeline.git";
 const PIPELINE_COMMIT = "5451d049de0117a63f2e84a352c71ef155ec7bb8";
 const IMAGE = process.env.SCAN_WORKER_IMAGE || "security-audit-worker";
+const BASE_IMAGE = `${IMAGE}-base`;
 const CONTAINER = "adis-scan-worker";
 const dataDir = resolve(dirname(resolve(process.env.LOCAL_DB_PATH || resolve(root, ".data", "adis-local.sqlite"))));
 const appPort = Number(process.env.PORT || 8787);
@@ -60,8 +61,17 @@ async function build() {
   run("git", ["-C", source, "fetch", "--quiet", "origin"]);
   if (run("git", ["-C", source, "checkout", "--quiet", PIPELINE_COMMIT]).status !== 0) process.exit(1);
   console.log(`Building ${IMAGE} from security-audit-pipeline@${PIPELINE_COMMIT.slice(0, 7)} (linux/amd64). The first build downloads several GB and takes a while.`);
-  const result = run("docker", ["build", "--platform", "linux/amd64", "-f", resolve(source, "apps/security-audit-worker/Dockerfile"), "-t", IMAGE, source]);
-  process.exit(result.status ?? 1);
+  const base = run("docker", ["build", "--platform", "linux/amd64", "-f", resolve(source, "apps/security-audit-worker/Dockerfile"), "-t", BASE_IMAGE, source]);
+  if (base.status !== 0) process.exit(base.status ?? 1);
+  process.exit(addReportFonts());
+}
+
+// The pipeline renders its PDF with Chrome, and its image has no emoji font, so the
+// report's ✅/❌ marks print as empty boxes. Add one in a thin layer on top.
+function addReportFonts() {
+  console.log(`Adding the report's emoji font: ${IMAGE} = ${BASE_IMAGE} + fonts-noto-color-emoji.`);
+  const result = run("docker", ["build", "--platform", "linux/amd64", "--build-arg", `BASE_IMAGE=${BASE_IMAGE}`, "-f", resolve(root, "docker/scan-worker-fonts.Dockerfile"), "-t", IMAGE, resolve(root, "docker")]);
+  return result.status ?? 1;
 }
 
 async function start() {
