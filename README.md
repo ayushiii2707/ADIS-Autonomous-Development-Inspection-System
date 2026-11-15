@@ -39,8 +39,8 @@ flowchart LR
 Node.js 22.9 or newer is required, because the server uses the built-in `node:sqlite` module. The project has no npm dependencies.
 
 ```bash
-git clone https://github.com/ayushiii2707/3rd-try.git
-cd 3rd-try
+git clone https://github.com/ayushiii2707/ADIS-Autonomous-Development-Inspection-System.git
+cd ADIS-Autonomous-Development-Inspection-System
 npm start
 ```
 
