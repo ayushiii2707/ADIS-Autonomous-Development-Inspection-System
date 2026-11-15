@@ -408,3 +408,24 @@ test("host.docker.internal is accepted only on worker paths, and a silent worker
     assert.match(stale.error, /stopped responding/);
   }, { workerOptions: { busy: true } });
 });
+
+test("a rule named in words counts only where the finding's file is named, and exact references win", async () => {
+  const { assessFindings } = await import("../worker/scan.js");
+  const report = [
+    "## 11. Infrastructure & Hardening Recommendations",
+    "### 11.3 Maintainability warnings: implicit string-concatenation",
+    "Files: `dashboard/*` (e.g., `dashboard/a.py`, `dashboard/b.py`)",
+    "## 12. False Positives",
+    "| File | Line | Rule | Reason |",
+    "|---|---|---|---|",
+    "| `dashboard/a.py` | 10–12 | `py/implicit-string-concatenation-in-list` | Intentional. |",
+    "## 13. Scanner Coverage Comparison",
+  ].join("\n");
+  const rule = "py/implicit-string-concatenation-in-list";
+  const out = assessFindings(report, [
+    { id: "C1", ruleId: rule, filePath: "dashboard/a.py", startLine: 11 },
+    { id: "C2", ruleId: rule, filePath: "dashboard/b.py", startLine: 5 },
+    { id: "C3", ruleId: rule, filePath: "audit/c.py", startLine: 5 },
+  ]);
+  assert.deepEqual(out.map((item) => `${item.id}:${item.assessment}`), ["C1:false-positive", "C2:hardening", "C3:not-in-report"]);
+});

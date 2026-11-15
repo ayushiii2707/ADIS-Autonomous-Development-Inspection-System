@@ -65,7 +65,7 @@ Copy `.env.example` to `.env` (git-ignored) or export variables in your shell:
 
 ### Users and sign-in
 
-Locally the app runs in single-user mode: every request acts as the local user, so no sign-in is needed. If the server is later placed behind an authenticating reverse proxy, set `LOCAL_DEMO_MODE=false` and `TRUST_USER_HEADER=true`; the proxy must then send the signed-in user's id in the `x-adis-user-id` header. API requests with no user are rejected with `401`. The header is ignored unless `TRUST_USER_HEADER=true`.
+Locally the app starts in single-user mode: every request acts as the local user, so no sign-in is needed. Once someone signs up from the landing page, accounts take over: the first account inherits the existing projects, every API call then needs a session (an HttpOnly cookie), and Logout ends it. Passwords are stored only as salted PBKDF2-SHA256 hashes and sessions only as SHA-256 hashes (migration `0011_local_accounts.sql`). If the server is later placed behind an authenticating reverse proxy, set `LOCAL_DEMO_MODE=false` and `TRUST_USER_HEADER=true`; the proxy must then send the signed-in user's id in the `x-adis-user-id` header. API requests with no user are rejected with `401`. The header is ignored unless `TRUST_USER_HEADER=true`.
 
 ## Security
 

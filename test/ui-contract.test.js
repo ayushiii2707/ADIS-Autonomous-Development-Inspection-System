@@ -41,11 +41,24 @@ test("repository onboarding offers only GitHub and Bitbucket with the agreed lab
 
 test("navigation exposes the two starting paths and the compact sidebar", async () => {
   const page = await servedPage();
-  for (const label of ["I have code", "starting from an idea", "SWITCH PROJECT", "Logout", "Discover", "Verify", "Operate", "New session"]) {
+  for (const label of ["I already have code", "I have an idea", "SWITCH PROJECT", "Logout", "Discover", "Verify", "Operate", "New session", ">⌂ &nbsp;Home</button>"]) {
     assert.ok(page.includes(label), `missing ${label}`);
   }
   assert.ok(page.includes("function toggleSidebar()"));
   assert.ok(page.includes("async function goDiscover()"));
+  // The top navigation replaced the sidebar: Home leads to the two starting paths.
+  assert.ok(page.includes('onclick="goHome()"') && page.includes('onclick="showWorkspace()">↔ SWITCH PROJECT</button>'));
+  assert.match(page, /function goHome\(\)\{[^\n]*else showStartingPoint\(\)\}/);
+});
+
+test("the landing page leads to real sign up and log in, and the code path asks for a repository", async () => {
+  const page = await servedPage();
+  assert.ok(page.includes('href="#/signup">Sign up</a>') && page.includes('href="#/login">Log in</a>'));
+  assert.ok(page.includes("api('/api/auth/'+mode,{method:'POST'"), "auth forms post to the account API");
+  assert.ok(page.includes("api('/api/auth/logout',{method:'POST'"), "logout ends the server session");
+  assert.ok(page.includes("function chooseCode(){if(state.connection)return showDashboard();setStage('code');showDashboard();connectPrompt()}"));
+  assert.ok(page.includes("connectScreen(\\'github\\')") && page.includes("connectScreen(\\'bitbucket\\')"));
+  assert.ok(!/<img[^>]+src="https?:/.test(page), "no external images, so the page CSP is unchanged");
 });
 
 test("saving setup always sends the connected repository, and a failed branch save is reported", async () => {
@@ -62,8 +75,8 @@ test("the page shows no hardcoded person, and scanning opens the Operate page", 
   assert.doesNotMatch(page, />Run scan</);
   assert.ok(!page.includes("Scanning not available yet"));
   assert.ok(page.includes('onclick="startScan()">Run full scan</button>'), "the dashboard scan row starts a scan");
-  assert.ok(page.includes('onclick="goOperate()"><span class="side-icon">⌁</span><span class="side-label">Operate'), "Operate opens the scans page");
+  assert.ok(page.includes('onclick="goOperate()">Operate</button>'), "Operate in the top navigation opens the scans page");
   assert.ok(page.includes("async function startScan(){") && page.includes("await goOperate(data.run.id)"), "starting a scan redirects to Operate");
   assert.ok(page.includes("<th>Assessment</th>") && page.includes("<th>Scanner level</th>") && !page.includes("item.scannerSeverity"), "findings show the report's assessment and the scanner level separately");
-  assert.match(page, /const viewer=\{"name":"Local user","role":"Owner","workspace":"My workspace","initials":"LU"\}/);
+  assert.match(page, /let viewer=\{"name":"Local user","role":"Owner","workspace":"My workspace","initials":"LU"\}/);
 });

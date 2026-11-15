@@ -302,6 +302,15 @@ function mentionsRule(text, ruleId) {
   return parts.length > 1 && last.length >= 8 && bounded(last);
 }
 
+// Reports sometimes name a rule in words ("implicit string-concatenation") rather
+// than by id. Match the first three or more words of the rule's last segment.
+const words = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+function describesRule(text, ruleId) {
+  const name = words(String(ruleId || '').split(/[./]/).at(-1)).split(' ');
+  if (name.length < 3) return false;
+  return ` ${words(text)} `.includes(` ${name.slice(0, 3).join(' ')} `);
+}
+
 function rowCoversLine(text, line) {
   const cells = text.split('|').map((cell) => cell.trim());
   const spec = cells.find((cell) => /^\d+(\s*[-–]\s*\d+)?(\s*\(.*\))?$/.test(cell));
@@ -314,16 +323,24 @@ export function assessFindings(markdown, entries) {
   const report = String(markdown || '');
   const knownFiles = [...new Set(entries.map((entry) => entry.filePath).filter(Boolean))];
   const sections = REPORT_SECTIONS.map(([assessment, title]) => ({ assessment, units: reportUnits(reportSection(report, title)) }));
+  const matches = (entry, { text, row }, byName) => {
+    const namesFile = entry.filePath && text.includes(entry.filePath);
+    if (byName) {
+      // A rule described in words only counts where the finding's file is named.
+      if (!namesFile || !describesRule(text, entry.ruleId)) return false;
+    } else {
+      if (entry.id && new RegExp(`(?<![\\w-])${escapeRegExp(entry.id)}(?![\\w-])`).test(text)) return true;
+      if (!mentionsRule(text, entry.ruleId)) return false;
+      if (!namesFile && knownFiles.some((file) => text.includes(file))) return false;
+    }
+    return !row || rowCoversLine(text, Number(entry.startLine));
+  };
   return entries.map((entry) => {
-    for (const { assessment, units } of sections) {
-      const hit = units.some(({ text, row }) => {
-        if (entry.id && new RegExp(`(?<![\\w-])${escapeRegExp(entry.id)}(?![\\w-])`).test(text)) return true;
-        if (!mentionsRule(text, entry.ruleId)) return false;
-        const namesFile = entry.filePath && text.includes(entry.filePath);
-        if (!namesFile && knownFiles.some((file) => text.includes(file))) return false;
-        return !row || rowCoversLine(text, Number(entry.startLine));
-      });
-      if (hit) return { ...entry, assessment };
+    // Exact references (finding id or rule id) win over rules described in words.
+    for (const byName of [false, true]) {
+      for (const { assessment, units } of sections) {
+        if (units.some((unit) => matches(entry, unit, byName))) return { ...entry, assessment };
+      }
     }
     return { ...entry, assessment: 'not-in-report' };
   });
@@ -433,7 +450,7 @@ export async function handleScanWorker(req, env, path) {
   if (!run) return json({ error: 'Unknown scan.' }, 404);
   const rest = path.slice('/scan-worker'.length);
 
-  // AI metering: the worker asks before each AI call and reports usage after. This app does not meter AI spend.
+  // AI metering: the worker asks before each AI call and reports usage after.
   // This app does not bill AI spend, but it caps it: each call reports its token usage, the run
   // keeps an estimated total, and once that reaches the run's budget no further call is allowed.
   if (rest === '/hub/adis/ai-metering/begin') {

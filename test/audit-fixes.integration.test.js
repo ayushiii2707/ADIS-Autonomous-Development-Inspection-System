@@ -186,7 +186,7 @@ test("the page carries security headers and the configured local identity", asyn
     assert.match(csp, /frame-ancestors 'none'/);
     assert.match(csp, /connect-src 'self'/);
     assert.equal(page.headers.get("x-frame-options"), "DENY");
-    assert.match(page.text, /const viewer=\{"name":"Priya Shah","role":"Owner","workspace":"Team \\u003cHub>","initials":"PS"\}/);
+    assert.match(page.text, /let viewer=\{"name":"Priya Shah","role":"Owner","workspace":"Team \\u003cHub>","initials":"PS"\}/);
     assert.doesNotMatch(page.text, /ayushi|TEST-A|__ADIS_VIEWER_JSON__/i);
     assert.doesNotMatch(page.text, />Run scan</);
   }, { env: { ADIS_USER_NAME: "Priya Shah", ADIS_WORKSPACE_NAME: "Team <Hub>" } });
