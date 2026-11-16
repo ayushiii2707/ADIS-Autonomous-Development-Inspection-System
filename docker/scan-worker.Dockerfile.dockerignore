@@ -1,0 +1,15 @@
+# Build context is the security-audit-pipeline checkout. Send only the worker app and the shared
+# metering package that docker/scan-worker.Dockerfile copies.
+*
+!apps/security-audit-worker/package.json
+!apps/security-audit-worker/tsconfig.json
+!apps/security-audit-worker/src
+!packages/ai-metering/package.json
+!packages/ai-metering/tsconfig.json
+!packages/ai-metering/tsconfig.build.json
+!packages/ai-metering/src
+!packages/ai-metering/contract
+**/node_modules
+**/dist
+**/.env
+**/.env.*

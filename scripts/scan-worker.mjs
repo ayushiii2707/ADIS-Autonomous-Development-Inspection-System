@@ -21,7 +21,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PIPELINE_REPO = "https://github.com/ayushiii2707/security-audit-pipeline.git";
 const PIPELINE_COMMIT = "5451d049de0117a63f2e84a352c71ef155ec7bb8";
 const IMAGE = process.env.SCAN_WORKER_IMAGE || "security-audit-worker";
-const BASE_IMAGE = `${IMAGE}-base`;
+// The image is built for this machine's own CPU (docker/scan-worker.Dockerfile supports both), so
+// the scanners run natively instead of under emulation. SCAN_WORKER_PLATFORM overrides it.
+const PLATFORM = process.env.SCAN_WORKER_PLATFORM || (process.arch === "arm64" ? "linux/arm64" : "linux/amd64");
 const CONTAINER = "adis-scan-worker";
 const dataDir = resolve(dirname(resolve(process.env.LOCAL_DB_PATH || resolve(root, ".data", "adis-local.sqlite"))));
 const appPort = Number(process.env.PORT || 8787);
@@ -37,7 +39,7 @@ function run(command, args, { quiet = false } = {}) {
 function requireDocker() {
   const info = run("docker", ["info", "--format", "{{.ServerVersion}}"], { quiet: true });
   if (info.status !== 0) {
-    console.error("Docker is not running. Start Docker Desktop (with \"Use Rosetta for x86_64/amd64 emulation\" on Apple Silicon) and try again.");
+    console.error("Docker is not running. Start Docker Desktop and try again.");
     process.exit(1);
   }
 }
@@ -60,25 +62,25 @@ async function build() {
   }
   run("git", ["-C", source, "fetch", "--quiet", "origin"]);
   if (run("git", ["-C", source, "checkout", "--quiet", PIPELINE_COMMIT]).status !== 0) process.exit(1);
-  console.log(`Building ${IMAGE} from security-audit-pipeline@${PIPELINE_COMMIT.slice(0, 7)} (linux/amd64). The first build downloads several GB and takes a while.`);
-  const base = run("docker", ["build", "--platform", "linux/amd64", "-f", resolve(source, "apps/security-audit-worker/Dockerfile"), "-t", BASE_IMAGE, source]);
-  if (base.status !== 0) process.exit(base.status ?? 1);
-  process.exit(addReportFonts());
-}
-
-// The pipeline renders its PDF with Chrome, and its image has no emoji font, so the
-// report's ✅/❌ marks print as empty boxes. Add one in a thin layer on top.
-function addReportFonts() {
-  console.log(`Adding the report's emoji font: ${IMAGE} = ${BASE_IMAGE} + fonts-noto-color-emoji.`);
-  const result = run("docker", ["build", "--platform", "linux/amd64", "--build-arg", `BASE_IMAGE=${BASE_IMAGE}`, "-f", resolve(root, "docker/scan-worker-fonts.Dockerfile"), "-t", IMAGE, resolve(root, "docker")]);
-  return result.status ?? 1;
+  console.log(`Building ${IMAGE} from security-audit-pipeline@${PIPELINE_COMMIT.slice(0, 7)} for ${PLATFORM}. The first build downloads several GB and takes a while.`);
+  // The build context is the pipeline checkout; `adis` is this repo's docker/ folder, which
+  // holds the patch the Dockerfile applies on top of the pinned commit.
+  const result = run("docker", ["buildx", "build", "--load", "--platform", PLATFORM,
+    "-f", resolve(root, "docker/scan-worker.Dockerfile"), "--build-context", `adis=${resolve(root, "docker")}`,
+    "-t", IMAGE, source]);
+  process.exit(result.status ?? 1);
 }
 
 async function start() {
   requireDocker();
-  if (run("docker", ["image", "inspect", IMAGE], { quiet: true }).status !== 0) {
+  const inspected = run("docker", ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", IMAGE], { quiet: true });
+  if (inspected.status !== 0) {
     console.error(`The ${IMAGE} image is not built yet. Run: npm run scan-worker:build`);
     process.exit(1);
+  }
+  const imagePlatform = inspected.stdout.trim();
+  if (imagePlatform !== PLATFORM) {
+    console.warn(`Note: the ${IMAGE} image is ${imagePlatform}, but this machine is ${PLATFORM}, so its scanners run under emulation and may be refused as too slow. Rebuild it natively with: npm run scan-worker:build`);
   }
   const keys = await loadScanKeys(dataDir);
   const appBase = `http://host.docker.internal:${appPort}`;
@@ -96,7 +98,7 @@ async function start() {
   ].join("\n"), { mode: 0o600 });
   await chmod(envFile, 0o600);
   run("docker", ["rm", "-f", CONTAINER], { quiet: true });
-  const result = run("docker", ["run", "-d", "--name", CONTAINER, "--platform", "linux/amd64", "-p", `127.0.0.1:${workerPort}:4101`, "--env-file", envFile, "--add-host", "host.docker.internal:host-gateway", IMAGE, "node", "dist/server.js"], { quiet: true });
+  const result = run("docker", ["run", "-d", "--name", CONTAINER, "--platform", imagePlatform, "-p", `127.0.0.1:${workerPort}:4101`, "--env-file", envFile, "--add-host", "host.docker.internal:host-gateway", IMAGE, "node", "dist/server.js"], { quiet: true });
   if (result.status !== 0) {
     console.error(result.stderr.trim());
     process.exit(1);
@@ -111,8 +113,8 @@ async function start() {
     process.exit(1);
   }
   // The worker refuses jobs unless `codeql --version` and `opengrep --version` answer
-  // within 5 seconds. Under amd64 emulation (Apple Silicon) their first, cold start
-  // is slower than that, so warm them up and wait until the worker sees them.
+  // within 5 seconds. A native image answers in well under a second; on a first, cold
+  // start (or an emulated image) warm them up and wait until the worker sees them.
   const slowCheck = (issues = []) => issues.some((issue) => /^(codeql|opengrep) binary not found/.test(issue));
   for (let attempt = 0; attempt < 12 && slowCheck(state?.issues); attempt += 1) {
     run("docker", ["exec", CONTAINER, "sh", "-c", "codeql --version >/dev/null 2>&1; opengrep --version >/dev/null 2>&1"], { quiet: true });

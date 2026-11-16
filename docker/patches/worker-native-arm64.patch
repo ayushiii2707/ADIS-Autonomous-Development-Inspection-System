@@ -1,0 +1,37 @@
+diff --git a/apps/security-audit-worker/src/child-env.ts b/apps/security-audit-worker/src/child-env.ts
+index f0ba53e..f612154 100644
+--- a/apps/security-audit-worker/src/child-env.ts
++++ b/apps/security-audit-worker/src/child-env.ts
+@@ -27,6 +27,7 @@ const PASS_THROUGH = [
+   'DOTNET_SKIP_FIRST_TIME_EXPERIENCE',
+   'DOTNET_NOLOGO',
+   'PUPPETEER_CACHE_DIR',
++  'PUPPETEER_EXECUTABLE_PATH',
+   'SONAR_SCANNER_OPTS',
+   'HTTP_PROXY',
+   'HTTPS_PROXY',
+diff --git a/apps/security-audit-worker/src/config.ts b/apps/security-audit-worker/src/config.ts
+index 4715d2f..d256918 100644
+--- a/apps/security-audit-worker/src/config.ts
++++ b/apps/security-audit-worker/src/config.ts
+@@ -147,12 +147,15 @@ export async function getWorkerReadinessIssues(
+     { key: 'opengrep', bin: 'opengrep' },
+     { key: 'sonarqube', bin: 'sonar-scanner' },
+   ];
++  // One at a time, not in parallel: codeql and sonar-scanner start a JVM and opengrep unpacks a
++  // PyInstaller bundle, so launched together they compete for CPU and each `--version` can exceed
++  // its 5 s timeout. A timed-out check is indistinguishable from a missing binary, so a parallel
++  // check reported installed scanners as "not found" and refused every scan.
+   const relevantChecks = binaryChecks.filter(({ key }) => scannerKeys.includes(key));
+-  const results = await Promise.all(
+-    relevantChecks.map(async ({ key, bin }) => ({ key, bin, ok: await isBinaryAvailable(bin) })),
+-  );
+-  for (const { key, bin, ok } of results) {
+-    if (!ok) issues.push(`${bin} binary not found on PATH (required for ${key} scanner)`);
++  for (const { key, bin } of relevantChecks) {
++    if (!(await isBinaryAvailable(bin))) {
++      issues.push(`${bin} binary not found on PATH (required for ${key} scanner)`);
++    }
+   }
+ 
+   return issues;
