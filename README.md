@@ -280,7 +280,7 @@ SCAN_AI_BUDGET_USD=2
 ### How the image is built
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph Host["npm run scan-worker:build"]
         CL[Clone security-audit-pipeline<br/>at a pinned commit] --> BX[docker buildx build<br/>--platform linux/arm64 or linux/amd64]
     end
