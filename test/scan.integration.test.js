@@ -228,7 +228,7 @@ test("a GitHub scan verifies access, runs on the worker, and stores findings and
     assert.equal(job.targetRef, "main");
     assert.ok(Number.isSafeInteger(job.softwareProjectId) && job.softwareProjectId > 0, "a numeric project reference for AI-usage metering");
     assert.deepEqual(job.credentials, { username: "x-access-token", token: GITHUB_PAT });
-    assert.deepEqual(job.scannerKeys, ["codeql", "opengrep", "trivy", "osv", "trufflehog"]);
+    assert.deepEqual(job.scannerKeys, ["codeql", "opengrep", "trivy", "trufflehog"]);
     assert.deepEqual(job.providerConfig, { providerKey: "openai-codex", apiKey: OPENAI_KEY });
     assert.match(job.webhookUrl, /\/scan-worker\/runs\/scan-[0-9a-f-]+\/webhook$/);
 

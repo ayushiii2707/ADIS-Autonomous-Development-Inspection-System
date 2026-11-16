@@ -48,7 +48,7 @@ flowchart LR
 | Security | **AES-256-GCM** for repository tokens, **PBKDF2-SHA256** for passwords, **Ed25519**-signed scan jobs, strict CSP and same-origin checks | All from Node's built-in `crypto`. Details in [Accounts and security](#accounts-and-security). |
 | Idea workflow AI | Any **OpenAI-compatible** chat API (default `gpt-4.1-mini`) | Works with OpenAI or any provider that speaks the same API. |
 | Security scanner | The [security-audit-pipeline](https://github.com/ayushiii2707/security-audit-pipeline) worker (**TypeScript**, Node 20) in **Docker** | The scanners need many native tools (CodeQL, .NET, Java, Go binaries, Chromium). Docker keeps them off your machine and pins every version. |
-| Scanners | **CodeQL, OpenGrep, Trivy, OSV-Scanner, TruffleHog** (optional: SonarQube, Dependency-Track, CycloneDX, Nuclei, ZAP) | Each covers a different kind of risk. See [the scanners](#the-scanners-and-why-each-one-is-used). |
+| Scanners | **CodeQL, OpenGrep, Trivy, TruffleHog** (optional: OSV-Scanner, SonarQube, Dependency-Track, CycloneDX, Nuclei, ZAP) | Each covers a different kind of risk. See [the scanners](#the-scanners-and-why-each-one-is-used). |
 | Scan report AI | **OpenAI Codex CLI** with `gpt-5-mini`, PDF rendered by **Puppeteer + Chromium** | Reads the merged findings, separates real issues from noise and writes the report. |
 | Tests | Node's built-in **`node:test`** runner | No test framework to install. Integration tests start the real server on a temporary database. |
 
@@ -177,7 +177,7 @@ flowchart TD
     I -->|busy| X7[Run failed: worker busy]
     I -->|ready| J[Send Ed25519-signed job to POST /jobs]
     J --> K[Worker clones the branch]
-    K --> L[Scanners run in parallel<br/>CodeQL, OpenGrep, Trivy, OSV, TruffleHog]
+    K --> L[Scanners run in parallel<br/>CodeQL, OpenGrep, Trivy, TruffleHog]
     L --> M[Coverage check]
     M --> N{Budget left?<br/>app asked before every AI call}
     N -->|no| X8[AI step stops: budget reached]
@@ -227,17 +227,17 @@ The worker takes one scan at a time. A scan that sends no heartbeat for 10 minut
 
 ### The scanners and why each one is used
 
-Each scanner looks at a different kind of risk, and their results overlap only in part. The default set is `codeql,opengrep,trivy,osv,trufflehog`.
+Each scanner looks at a different kind of risk, and their results overlap only in part. The default set is `codeql,opengrep,trivy,trufflehog`.
 
 | Scanner | What it checks | Why it is in the set |
 | --- | --- | --- |
 | **CodeQL** | Builds a database of the source code and follows data through it, for example from a request parameter to an SQL query or a shell command. | It finds injection and data-flow bugs that cross several functions and files. Pattern matchers cannot see those paths, so CodeQL gives the deepest code analysis in the set. |
 | **OpenGrep** | Matches the code against large rule packs of known insecure patterns, written for specific languages and frameworks. It is the open-source fork of Semgrep. | It is fast and covers frameworks, configuration files and languages that CodeQL does not model. Weak crypto calls, disabled TLS checks and unsafe framework options are typical results. |
 | **Trivy** | Reads lockfiles and manifests for packages with known CVEs, and checks Dockerfiles and infrastructure files for misconfiguration. | Most of a modern project is third-party code. Trivy reports the vulnerable versions you depend on, together with the version that fixes each one. |
-| **OSV-Scanner** | Matches dependencies against the OSV.dev database, which collects advisories from each language ecosystem. | It is a second source for dependency vulnerabilities. Advisory databases differ, so two sources miss fewer issues, and a finding reported by both is more likely to be real. |
+| **OSV-Scanner** (optional) | Matches dependencies against the OSV.dev database, which collects advisories from each language ecosystem. | Not in the default set, because Trivy already checks dependencies for known vulnerabilities. It is a second source: advisory databases differ, so two sources miss fewer issues, but it adds its own AI write-up to every scan. Add `osv` to `SCAN_SCANNERS` to use it. |
 | **TruffleHog** | Searches the files and the full git history for secrets such as API keys, tokens and private keys, and can test whether a found key still works. | A key deleted in a later commit is still in the history. TruffleHog finds those keys and separates live keys from dead ones. |
 
-Five more scanners can be added through `SCAN_SCANNERS`. SonarQube and Dependency-Track need their own servers. Nuclei and ZAP test a running web application, so they need a live URL. `bom-cyclonedx` produces a software bill of materials. A scanner that cannot run is recorded as skipped and the rest of the scan continues.
+Six optional scanners can be added through `SCAN_SCANNERS`; none of them runs unless it is listed there. OSV-Scanner is described above. SonarQube and Dependency-Track need their own servers. Nuclei and ZAP test a running web application, so they need a live URL. `bom-cyclonedx` produces a software bill of materials. A scanner that cannot run is recorded as skipped and the rest of the scan continues.
 
 ### How findings are assessed
 
@@ -495,7 +495,7 @@ The worker uses `/scan-worker/*` for logs, heartbeats, AI metering and the final
 | `SCAN_AI_PROVIDER` | `openai-codex` | Report agent used by the pipeline. |
 | `SCAN_AI_MODEL` | pipeline default (`gpt-5`) | Report model. `gpt-5-mini` costs about a fifth as much. |
 | `SCAN_AI_BUDGET_USD` | `2` | Estimated AI spend allowed per scan. |
-| `SCAN_SCANNERS` | `codeql,opengrep,trivy,osv,trufflehog` | Scanners to run. Others: `sonarqube`, `dependency-track`, `bom-cyclonedx`, `nuclei`, `zap`. |
+| `SCAN_SCANNERS` | `codeql,opengrep,trivy,trufflehog` | Scanners to run. Optional: `osv`, `sonarqube`, `dependency-track`, `bom-cyclonedx`, `nuclei`, `zap`. |
 | `SCAN_WORKER_URL` | `http://127.0.0.1:4101` | Address of the scan worker. |
 | `SCAN_WORKER_IMAGE` | `security-audit-worker` | Docker image name used by the `scan-worker:*` scripts. |
 
