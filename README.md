@@ -19,11 +19,13 @@ flowchart LR
 
 ## Contents
 
+- [Tech stack](#tech-stack)
 - [Quick start](#quick-start)
 - [Keys and credentials](#keys-and-credentials)
 - [Using the app](#using-the-app)
 - [Architecture](#architecture)
 - [Path 1: existing code and the security audit pipeline](#path-1-existing-code-and-the-security-audit-pipeline)
+- [The Docker scan worker](#the-docker-scan-worker)
 - [Path 2: an idea and the Elephant–Goldfish workflow](#path-2-an-idea-and-the-elephantgoldfish-workflow)
 - [Accounts and security](#accounts-and-security)
 - [Data storage](#data-storage)
@@ -33,6 +35,22 @@ flowchart LR
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 - [Branches](#branches)
+
+## Tech stack
+
+| Layer | Technology | Why it was chosen |
+| --- | --- | --- |
+| Runtime | **Node.js 22.9+**, ES modules | Ships a web server, crypto, file access and SQLite in the box, so the app needs no npm packages at all. |
+| Server code | Plain JavaScript in the **Cloudflare Worker style** (`fetch(request, env)`) | The handler never touches files or databases directly, so the same code could be deployed to Cloudflare Workers later without a rewrite. Locally, `scripts/local-backend.mjs` plays the platform's part. |
+| Database | **SQLite** through the built-in `node:sqlite` module, WAL mode | One file, no server to install, transactions and foreign keys. The adapter exposes the same `prepare / bind / batch` API as Cloudflare D1. |
+| File storage | A small **S3-compatible store** built into the app (AWS Signature V4), writing to `.data/scan-artifacts/` | The scan pipeline was written for S3. Serving S3 locally avoids running MinIO or paying for a cloud bucket. |
+| Interface | One HTML page with plain **HTML, CSS and JavaScript**, hash routes, Geist fonts from Google Fonts | No framework and no build step. The page is served by the same process as the API, so there is no CORS to configure. |
+| Security | **AES-256-GCM** for repository tokens, **PBKDF2-SHA256** for passwords, **Ed25519**-signed scan jobs, strict CSP and same-origin checks | All from Node's built-in `crypto`. Details in [Accounts and security](#accounts-and-security). |
+| Idea workflow AI | Any **OpenAI-compatible** chat API (default `gpt-4.1-mini`) | Works with OpenAI or any provider that speaks the same API. |
+| Security scanner | The [security-audit-pipeline](https://github.com/ayushiii2707/security-audit-pipeline) worker (**TypeScript**, Node 20) in **Docker** | The scanners need many native tools (CodeQL, .NET, Java, Go binaries, Chromium). Docker keeps them off your machine and pins every version. |
+| Scanners | **CodeQL, OpenGrep, Trivy, OSV-Scanner, TruffleHog** (optional: SonarQube, Dependency-Track, CycloneDX, Nuclei, ZAP) | Each covers a different kind of risk. See [the scanners](#the-scanners-and-why-each-one-is-used). |
+| Scan report AI | **OpenAI Codex CLI** with `gpt-5-mini`, PDF rendered by **Puppeteer + Chromium** | Reads the merged findings, separates real issues from noise and writes the report. |
+| Tests | Node's built-in **`node:test`** runner | No test framework to install. Integration tests start the real server on a temporary database. |
 
 ## Quick start
 
@@ -69,10 +87,19 @@ Repository tokens are encrypted before they reach the database, and the two `.en
 2. **Sign up.** Enter a name, an email and a password of at least 8 characters. The first account on a fresh install also takes over any projects that were created before accounts existed.
 3. **Add a project.** A popup asks for a project name and a short code, for example `AX-01`.
 4. **Choose a starting point.** Two cards are shown: **I already have code** and **I have an idea**.
-5. **Code path.** A popup asks you to connect a repository. After **Check and add**, the app confirms the token can read that exact repository and then lists its branches and folders. Choose the branch to work on and finish setup. **Operate** holds **Run full scan**, which shows live stages and logs while a scan runs and lists the findings with a PDF download when it finishes.
+5. **Code path.** A five-step setup opens:
+   1. **Connect sources:** pick GitHub or Bitbucket and enter the token. After **Check and add**, the app confirms the token can read that exact repository.
+   2. **Repositories & branches:** choose the branch to scan from the live list.
+   3. **Products:** say whether the repository is one product or several (a monorepo), give the product a name and pick its type (Web, Mobile, API, Database or Service). The type is a label; it does not change what the scan checks.
+   4. **Sort your items:** choose whether repository issues come in and how each label is treated.
+   5. **Review:** check the choices and finish.
+
+   **Operate** then holds **Run full scan**, which shows live stages and logs while a scan runs and lists the findings with a PDF download when it finishes.
 6. **Idea path.** Elephant asks one question at a time. When the idea is clear, it runs the brainstorm, drafts the design document section by section and sends it to independent Goldfish reviewers. You decide what happens to each finding.
 
 The top bar stays the same everywhere. **Home** returns to the two starting points, **Discover** and **Operate** open those pages, and the project name has **Switch project** under it. Switch project lists all your projects with the active one first and has a **Create a new project** panel on the right.
+
+**Deleting a project.** Each project card has a trash icon. The dialog lists what will be removed and asks you to type the project's code before **Delete project** turns on. Deleting removes the project's repository connection, setup, scan history, idea work, and its PDF reports and raw scanner outputs on disk. The repository on GitHub or Bitbucket is not touched. Only the project's owner can delete it, and not while one of its scans is running.
 
 ## Architecture
 
@@ -127,6 +154,46 @@ Discovery then reads every branch and folder through the provider's official API
 
 The scanner is the separate [security-audit-pipeline](https://github.com/ayushiii2707/security-audit-pipeline) project, run as a Docker container. This app acts as its control plane: it checks the request, sends the job, receives progress and stores the results.
 
+#### The Run scan workflow
+
+Every check before the job leaves the app has its own error message, so a refused scan always says what to fix.
+
+```mermaid
+flowchart TD
+    A([You click Run full scan]) --> B{Scanning configured?<br/>signing keys + artifact store}
+    B -->|no| X1[Refused: scanning not available]
+    B -->|yes| C{A scan already running<br/>for this project?}
+    C -->|yes| X2[Refused: one scan at a time per project]
+    C -->|no| D{Setup finished?<br/>repository + branch chosen}
+    D -->|no| X3[Refused: finish setup first]
+    D -->|yes| E{SCAN_AI_API_KEY set?}
+    E -->|no| X4[Refused: add the key to .env]
+    E -->|yes| F[Run created: status verifying]
+    F --> G[Decrypt the stored token on the server]
+    G --> H{Provider still accepts it?<br/>auth, repository, branch}
+    H -->|no| X5[Run failed: names the failed check]
+    H -->|yes| I{Worker /health answers<br/>and is idle?}
+    I -->|not running| X6[Run failed: start the worker]
+    I -->|busy| X7[Run failed: worker busy]
+    I -->|ready| J[Send Ed25519-signed job to POST /jobs]
+    J --> K[Worker clones the branch]
+    K --> L[Scanners run in parallel<br/>CodeQL, OpenGrep, Trivy, OSV, TruffleHog]
+    L --> M[Coverage check]
+    M --> N{Budget left?<br/>app asked before every AI call}
+    N -->|no| X8[AI step stops: budget reached]
+    N -->|yes| O[AI write-up per scanner,<br/>then the final report]
+    O --> P[PDF rendered with Chromium]
+    P --> Q[Report + raw outputs uploaded<br/>to the app's S3 store]
+    Q --> R[Webhook: final result]
+    R --> S([Operate shows findings, cost<br/>and Download PDF report])
+    K -.->|heartbeat + logs all the way through| HB{Silent for 10 min?}
+    HB -->|yes| X9[Run marked failed]
+```
+
+On a medium repository the scanners take a minute or two, each AI write-up one to two minutes, and the final report about three minutes, so a full scan usually ends in about 15 minutes. Large repositories can take 20–30 minutes.
+
+The same exchange as messages between the parts:
+
 ```mermaid
 sequenceDiagram
     participant UI as Operate page
@@ -180,16 +247,26 @@ Scanners report many items that are not real problems in context. For that reaso
 
 The pipeline asks the app before each AI call and reports the tokens used after it. The app keeps an estimated running cost for the scan and refuses new calls once it reaches `SCAN_AI_BUDGET_USD` (default `$2`). A call already in progress can go slightly past the limit. With `SCAN_AI_MODEL=gpt-5-mini`, a scan of a small-to-medium repository has cost about $0.15. The estimated cost of every run is shown on the Operate page.
 
-### Setting up the scan worker
+### Why the scan link is built this way
 
-Docker Desktop is needed, with about 25–30 GB of free disk space for the image. On Apple Silicon, turn on *Use Rosetta for x86_64/amd64 emulation* in Docker Desktop, because the image is built for amd64. Scans are slower under that emulation.
+The app signs each job with an **Ed25519** private key, and the worker holds only the public key. A leaked worker configuration therefore cannot be used to create jobs. Every token names its run and its scope (dispatch or callback) and expires after six hours, so a callback for one run cannot change another run.
+
+The pipeline was written to upload results to S3. Instead of requiring MinIO or a cloud bucket, the app serves a small S3-compatible endpoint itself, checks the **AWS Signature V4** on every upload and writes the objects to `.data/scan-artifacts/`. The signing keys are created once under `.data/` with file mode 600 and reused, so a running worker keeps working after the app restarts.
+
+## The Docker scan worker
+
+The core app runs without Docker. Docker is needed only for security scans, because the scanners need native tools (CodeQL, a JDK, .NET, Go binaries, Chromium) that would otherwise have to be installed on your machine.
+
+### Setting it up
+
+Docker Desktop is needed, with about 25–30 GB of free disk space for the image.
 
 ```bash
-npm run scan-worker:build    # once: builds the pipeline image at a pinned commit, plus a font layer for the PDF
+npm run scan-worker:build    # once: builds the image for this machine's CPU
 npm run scan-worker:start    # starts the worker on 127.0.0.1:4101, wired to this app
 npm run scan-worker:status   # container state and /health
 npm run scan-worker:logs     # recent worker logs
-npm run scan-worker:stop
+npm run scan-worker:stop     # removes the container (the image stays)
 ```
 
 Then add the scan settings to `.env` and restart the app:
@@ -200,13 +277,62 @@ SCAN_AI_MODEL=gpt-5-mini
 SCAN_AI_BUDGET_USD=2
 ```
 
-The build pins the pipeline to one commit, so a change in that repository cannot alter scans without a deliberate update here. The worker port is published on `127.0.0.1` only. The worker reaches the app through `host.docker.internal`.
+### How the image is built
 
-### Why the scan link is built this way
+```mermaid
+flowchart LR
+    subgraph Host["npm run scan-worker:build"]
+        CL[Clone security-audit-pipeline<br/>at a pinned commit] --> BX[docker buildx build<br/>--platform linux/arm64 or linux/amd64]
+    end
+    BX --> B1
+    subgraph Builder["Stage 1: builder (build machine's own CPU)"]
+        B1[npm install] --> B2[Apply docker/patches/worker-native-arm64.patch] --> B3[Compile TypeScript to dist/]
+    end
+    B3 --> R5
+    subgraph Runtime["Stage 2: runtime (target CPU)"]
+        R1[Pick release assets for amd64 or arm64] --> R2[Install CodeQL, OpenGrep, Trivy, OSV,<br/>TruffleHog, Nuclei, Sonar, .NET]
+        R2 --> R3[Check every binary is built for the target CPU]
+        R3 --> R4[Install Chromium for the PDF report]
+        R4 --> R5[Copy dist/, run as non-root user]
+    end
+    R5 --> IMG[(security-audit-worker image)]
+```
 
-The app signs each job with an **Ed25519** private key, and the worker holds only the public key. A leaked worker configuration therefore cannot be used to create jobs. Every token names its run and its scope (dispatch or callback) and expires after six hours, so a callback for one run cannot change another run.
+`scripts/scan-worker.mjs build` clones the [security-audit-pipeline](https://github.com/ayushiii2707/security-audit-pipeline) at one pinned commit, so a change in that repository cannot alter scans without a deliberate update here. It then builds `docker/scan-worker.Dockerfile` with `docker buildx` for this machine's CPU: amd64 on Intel and AMD, arm64 on Apple Silicon and other ARM machines. Set `SCAN_WORKER_PLATFORM=linux/amd64` or `linux/arm64` to build for the other one.
 
-The pipeline was written to upload results to S3. Instead of requiring MinIO or a cloud bucket, the app serves a small S3-compatible endpoint itself, checks the **AWS Signature V4** on every upload and writes the objects to `.data/scan-artifacts/`. The signing keys are created once under `.data/` with file mode 600 and reused, so a running worker keeps working after the app restarts.
+**Why this repository has its own Dockerfile.** The pipeline's own Dockerfile is amd64-only. On an Apple Silicon Mac it ran under emulation, where `codeql --version` and `opengrep --version` each took about 4 seconds. The worker checks that its scanners exist before accepting a job, gives each check 5 seconds, and ran the checks all at once, so under emulation they timed out and every scan was refused with "binary not found on PATH". Building natively makes the same checks finish in well under a second, and the scans themselves run several times faster.
+
+**What the Dockerfile does:**
+
+- **Two stages.** The TypeScript is compiled in a builder stage on the build machine's own CPU. The compiled JavaScript is the same for every target, and this avoids compiler crashes under emulation.
+- **One patch** (`docker/patches/worker-native-arm64.patch`) is applied to the pipeline before compiling. It runs the readiness checks one at a time instead of all at once, so they never compete for CPU, and it passes the report browser's path through to the report step. The build fails if the patch does not apply cleanly.
+- **Per-architecture downloads.** A table at the top of the runtime stage picks the right release file for each tool. Every downloaded binary is then checked: its ELF header must match the target CPU, and it must run.
+- **Same versions as upstream**, with two exceptions forced by what is published for arm64. CodeQL moves to the 2.27.3 bundle on both architectures, because older bundles have no arm64 build. The PDF browser is Chrome for Testing on amd64 and Debian's Chromium on arm64, because Chrome for Testing has no Linux arm64 build. Both are reached through one wrapper, `/usr/local/bin/report-chrome`.
+- **Emoji font** (`fonts-noto-color-emoji`) is installed so emoji in findings render in the PDF.
+- **Small build context.** `docker/scan-worker.Dockerfile.dockerignore` sends only the worker's sources to Docker.
+- **Non-root.** Scans run as the `worker` user. Builds that a scanner needs (for example CodeQL compiling C#) run as a separate `scanbuild` user.
+
+| Tool in the image | Version |
+| --- | --- |
+| CodeQL bundle | 2.27.3 |
+| OpenGrep | 1.1.0 |
+| Trivy | 0.74.0 |
+| OSV-Scanner | 2.6.0 |
+| TruffleHog | 3.97.5 |
+| Nuclei (+ templates) | 3.11.1 (templates 10.4.9) |
+| Sonar Scanner CLI / for .NET | 6.2.1 / 6.2.0 |
+| .NET SDK | 8.0 |
+| Node.js (worker runtime) | 20 |
+
+### How the container runs
+
+`npm run scan-worker:start` starts the container `adis-scan-worker`:
+
+- Its port is published on **`127.0.0.1:4101` only**, so nothing outside your machine can reach it.
+- It reaches the app through `host.docker.internal`, which Docker maps to your machine.
+- Its settings come from `.data/scan-worker.env` (file mode 600), written by the script: the app's callback address, the public key for checking job signatures and the S3 keys for uploads. The private signing key never leaves the app.
+- It takes **one scan at a time**. The app checks `/health` before sending a job and refuses a scan while the worker is busy.
+- If the image was built for a different CPU than this machine's, `start` prints a warning, because emulated scans are slow and the readiness check may fail.
 
 ## Path 2: an idea and the Elephant–Goldfish workflow
 
@@ -265,7 +391,8 @@ Everything lives in `.data/`, which git ignores.
 | `credential.key` | AES-256 key for repository credentials. Keep it with the database; without it the stored tokens cannot be read. The server refuses to create a new key for a database that already holds encrypted credentials. |
 | `scan-dispatch.key` | Ed25519 key pair for scan job tokens. |
 | `scan-storage.json` | Access keys for the built-in S3 store. |
-| `scan-artifacts/` | Uploaded PDF reports and raw scanner outputs. |
+| `scan-artifacts/` | Uploaded PDF reports and raw scanner outputs. A project's files here are removed when the project is deleted. |
+| `scan-worker.env` | Settings handed to the worker container. |
 
 The numbered files in `migrations/` are the only source of the schema. They run in order inside transactions at startup and are recorded in `schema_migrations`. Each migration only adds to the schema, so existing data is kept. A database created by an older build, which used a `d1_migrations` table, is upgraded in place.
 
@@ -300,6 +427,7 @@ All routes are under `/api`, return JSON unless noted and are limited to the sig
 | `GET /api/projects` | List your projects. |
 | `POST /api/projects` | `{name, code}`. Create a project. |
 | `GET /api/projects/{id}` | One project. |
+| `DELETE /api/projects/{id}` | Delete a project with everything in it, including its stored scan reports. Refused with 409 while one of its scans is running. |
 | `GET /api/projects/{id}/connections` | Repository connections, without credentials. |
 | `POST /api/projects/{id}/connections` | Connect a repository. GitHub: `{provider:"github", owner, repository, pat}`. Bitbucket: `{provider:"bitbucket", workspace, repository, token, email, username}`. |
 | `DELETE /api/projects/{id}/connections/{connectionId}` | Remove a connection. |
@@ -389,7 +517,10 @@ scripts/
   validate-artifact.mjs  boots the app on a temporary database and checks it
   build.sh            syntax check of every module
 migrations/           numbered SQL schema files (0001 to 0011)
-docker/               font layer added to the scan worker image for the PDF
+docker/
+  scan-worker.Dockerfile             multi-arch (amd64 + arm64) scan worker image
+  scan-worker.Dockerfile.dockerignore  keeps the build context to the worker's sources
+  patches/worker-native-arm64.patch  applied to the pinned pipeline at build time
 docs/ideation/        design notes for the idea workflow
 test/                 unit, UI contract and integration tests
 ```
@@ -410,6 +541,7 @@ The integration tests start a real HTTP server on a temporary SQLite file. Calls
 - **`node:sqlite` not found.** Node.js is older than 22.9. Upgrade Node.
 - **"Scanning is not configured" or a missing-key message on Operate.** Set `SCAN_AI_API_KEY` in `.env`, start the worker with `npm run scan-worker:start` and restart the app.
 - **"The scan worker is not running."** Start Docker Desktop and then the worker. `npm run scan-worker:status` shows whether `/health` answers.
+- **"binary not found on PATH" when starting a scan.** The worker image was built for a different CPU and is running under emulation. Rebuild it with `npm run scan-worker:build` (it targets this machine's CPU) and start it again. `npm run scan-worker:start` warns when the image and the machine differ.
 - **Trivy or OpenGrep warnings in the scan log.** Trivy downloads its vulnerability database and OpenGrep downloads some rule packs when a scan starts. A network problem skips that part, and the other scanners continue. Run the scan again when the connection is stable.
 - **A connection fails with 403.** The token can sign in but cannot read the repository. Check the scopes listed in [Keys and credentials](#keys-and-credentials) and, for fine-grained GitHub tokens, that the repository is selected.
 - **Idea steps say AI is not configured.** Set `AI_API_KEY` in `.env` and restart.
