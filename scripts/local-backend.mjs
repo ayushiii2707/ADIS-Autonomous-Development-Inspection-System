@@ -5,7 +5,7 @@
 // binding, or external account involved: `npm start` is all that is needed.
 
 import { createServer } from "node:http";
-import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, relative, resolve, sep } from "node:path";
@@ -233,6 +233,10 @@ function createArtifactStore(root) {
         if (error.code === "ENOENT" || error.code === "EISDIR") return null;
         throw error;
       }
+    },
+    // Removes one artifact, or a whole folder of them (a scan's raw outputs).
+    async delete(key) {
+      await rm(pathFor(key), { recursive: true, force: true });
     },
   };
 }

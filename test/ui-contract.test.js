@@ -36,7 +36,8 @@ test("repository onboarding offers only GitHub and Bitbucket with the agreed lab
   assert.equal(count(page, /＋ Check/g), 0);
   assert.equal(count(page, /Azure/gi), 0);
   assert.ok(page.includes(">Select an option</option>"));
-  assert.ok(page.includes("services=['Web','Mobile','API','Database','Service']"));
+  assert.match(page, /services=\[\['Web',[^\]]*\],\['Mobile',[^\]]*\],\['API',[^\]]*\],\['Database',[^\]]*\],\['Service',[^\]]*\]\]/);
+  assert.equal(count(page, /Work tracking/g), 0);
 });
 
 test("navigation exposes the two starting paths and the compact sidebar", async () => {
