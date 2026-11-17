@@ -369,6 +369,62 @@ Each Elephant and Goldfish call is a separate, stateless model request, stored a
 
 `AI_MAX_CONCURRENCY` (default 4) limits how many model requests run at once. Set it to `1` on accounts with low per-minute token limits. Rate-limited requests wait for the provider's `Retry-After` and are retried.
 
+### Worked example: a placement application tracker
+
+This walks one small idea from first message to approval, showing who does what. There are three actors:
+
+- **You** decide everything: scope, rules, which fixes to accept and final approval.
+- **Elephant** remembers the whole conversation. It asks questions, drafts, checks the draft against the brief, sorts findings and applies fixes.
+- **Goldfish** start with no memory and see only what they are handed. Anything that is not written down clearly, they catch.
+
+The opening message: *"I want to build a personal placement application tracker. I keep applications in scattered notes and sometimes forget the next action."*
+
+**Part 1: clarify and brainstorm.** The Elephant asks about the basics, then about edge cases you have not decided yet: does a date include a time, should duplicates be blocked, how do deleting and backups work. It turns your answers into one testable claim. Seven Goldfish lenses attack that claim while seeing nothing else, and a Goldfish synthesizer writes `concepts_brief.md` with the strongest objections. Your answers to those objections become rules the draft is later checked against.
+
+```mermaid
+flowchart TD
+    A["You: share the idea<br/>scattered notes, missed follow-ups"]
+    B["Elephant: ask questions<br/>users, fields, success"]
+    C["You: answer the scope<br/>fields, six statuses, local SQLite"]
+    D["Elephant: probe edge cases<br/>dates, duplicates, deletes, backups"]
+    E["You: set exact rules<br/>overdue = before today, unless closed"]
+    F["Elephant: anchored hypothesis<br/>one testable claim"]
+    G["Goldfish: 7 lenses attack it<br/>see the hypothesis only"]
+    H["Goldfish: synthesizer<br/>writes concepts_brief.md"]
+    I["You: answer the objections<br/>restore preview + confirmation"]
+    A --> B --> C --> D --> E --> F --> G --> H --> I
+    classDef you fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef elephant fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef goldfish fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    class A,C,E,I you
+    class B,D,F elephant
+    class G,H goldfish
+```
+
+**Part 2: draft, review and approve.** The Elephant drafts four parts, and you approve each one. The finished draft is compared with the brief and saved as version 1. Fresh Goldfish review it in five stages, reading only the document. Round 1 finds one Nit, the empty overdue screen's wording, and Nits never block, so the round counts as clean. The accepted fix becomes version 2. A second set of fresh Goldfish finds nothing new, so two clean rounds in a row end the review.
+
+```mermaid
+flowchart TD
+    A["Elephant: draft 4 parts<br/>one part at a time"]
+    B["You: approve each part<br/>or send feedback"]
+    C["Elephant: check against brief<br/>no contradictions, save v1"]
+    D["Goldfish: review round 1<br/>5 stages, document only"]
+    E["Elephant: classify findings<br/>1 Nit: empty overdue view"]
+    F["You: accept the fix<br/>show 'No overdue actions.'"]
+    G["Elephant: write version 2<br/>linked to version 1"]
+    H["Goldfish: review round 2<br/>fresh reviewers, clean"]
+    I["You: approve the design<br/>SHA-256 recorded"]
+    A --> B --> C --> D --> E --> F --> G --> H --> I
+    classDef you fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef elephant fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef goldfish fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    class B,F,I you
+    class A,C,E,G elephant
+    class D,H goldfish
+```
+
+The approved document, every earlier version, `concepts_brief.md` and both review reports can then be downloaded as Markdown.
+
 ## Accounts and security
 
 **Accounts.** A fresh install runs in single-user mode until the first account is created. The first account takes over the existing projects, and from then on every API call needs a session. Passwords are stored as salted PBKDF2-SHA256 hashes with 310,000 iterations. The session cookie, `adis_session`, is HttpOnly and SameSite=Lax and lasts 30 days, and the database keeps only a SHA-256 hash of its value. After five failed logins for one email, further attempts are refused for a minute. An unknown email takes as long to reject as a wrong password, so login timing does not show which emails have accounts.
