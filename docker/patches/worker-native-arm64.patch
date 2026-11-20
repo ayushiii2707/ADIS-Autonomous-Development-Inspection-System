@@ -11,10 +11,27 @@ index f0ba53e..f612154 100644
    'HTTP_PROXY',
    'HTTPS_PROXY',
 diff --git a/apps/security-audit-worker/src/config.ts b/apps/security-audit-worker/src/config.ts
-index 4715d2f..d256918 100644
+index 4715d2f..af225ed 100644
 --- a/apps/security-audit-worker/src/config.ts
 +++ b/apps/security-audit-worker/src/config.ts
-@@ -147,12 +147,15 @@ export async function getWorkerReadinessIssues(
+@@ -106,10 +106,13 @@ async function isBinaryAvailable(bin: string): Promise<boolean> {
+   }
+   let ok: boolean;
+   try {
+-    await execa(bin, ['--version'], { timeout: 5000 });
++    await execa(bin, ['--version'], { timeout: 15000 });
+     ok = true;
+-  } catch {
+-    ok = false;
++  } catch (error) {
++    // Only a missing or non-executable file means "not found". A timeout means the binary exists
++    // but started slowly: opengrep unpacks a ~50 MB bundle on every run and can take several
++    // seconds on a busy or freshly woken machine. Reporting that as "not found" refused every scan.
++    ok = Boolean((error as { timedOut?: boolean }).timedOut);
+   }
+   binaryStatusCache.set(bin, { ok, checkedAt: now });
+   return ok;
+@@ -147,12 +150,15 @@ export async function getWorkerReadinessIssues(
      { key: 'opengrep', bin: 'opengrep' },
      { key: 'sonarqube', bin: 'sonar-scanner' },
    ];

@@ -202,7 +202,9 @@ export async function startScan(env, ctx, projectId, actorId) {
 
     let health;
     try {
-      const response = await workerRequest(config.workerUrl + '/health', {}, 8000);
+      // /health runs the worker's scanner checks one after another (up to 15 s each, see
+      // docker/patches), so allow for the slow case instead of reporting the worker as down.
+      const response = await workerRequest(config.workerUrl + '/health', {}, 45000);
       health = await response.json();
     } catch {
       throw new ScanError(503, 'The security scan worker is not running. Start it with: npm run scan-worker:start');

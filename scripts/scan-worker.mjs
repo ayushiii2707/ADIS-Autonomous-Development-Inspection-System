@@ -46,7 +46,7 @@ function requireDocker() {
 
 async function health() {
   try {
-    const response = await fetch(workerUrl + "/health", { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(workerUrl + "/health", { signal: AbortSignal.timeout(45000) });
     return await response.json();
   } catch {
     return null;
@@ -112,9 +112,9 @@ async function start() {
     console.error("The worker did not answer /health within 2 minutes. Check: npm run scan-worker:logs");
     process.exit(1);
   }
-  // The worker refuses jobs unless `codeql --version` and `opengrep --version` answer
-  // within 5 seconds. A native image answers in well under a second; on a first, cold
-  // start (or an emulated image) warm them up and wait until the worker sees them.
+  // The worker checks `codeql --version` and `opengrep --version` before taking jobs (15 s
+  // each; a slow start counts as installed, see docker/patches). On a first, cold start
+  // warm them up and wait until the worker sees them.
   const slowCheck = (issues = []) => issues.some((issue) => /^(codeql|opengrep) binary not found/.test(issue));
   for (let attempt = 0; attempt < 12 && slowCheck(state?.issues); attempt += 1) {
     run("docker", ["exec", CONTAINER, "sh", "-c", "codeql --version >/dev/null 2>&1; opengrep --version >/dev/null 2>&1"], { quiet: true });
