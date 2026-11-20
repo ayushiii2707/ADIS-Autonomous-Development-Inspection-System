@@ -25,6 +25,7 @@ flowchart LR
 - [Using the app](#using-the-app)
 - [Architecture](#architecture)
 - [Path 1: existing code and the security audit pipeline](#path-1-existing-code-and-the-security-audit-pipeline)
+- [Scan Impact Analysis](#scan-impact-analysis)
 - [The Docker scan worker](#the-docker-scan-worker)
 - [Path 2: an idea and the Elephant–Goldfish workflow](#path-2-an-idea-and-the-elephantgoldfish-workflow)
 - [Accounts and security](#accounts-and-security)
@@ -94,7 +95,7 @@ Repository tokens are encrypted before they reach the database, and the two `.en
    4. **Sort your items:** choose whether repository issues come in and how each label is treated.
    5. **Review:** check the choices and finish.
 
-   **Operate** then holds **Run full scan**, which shows live stages and logs while a scan runs and lists the findings with a PDF download when it finishes.
+   **Operate** then holds **Run full scan**, which shows live stages and logs while a scan runs and lists the findings with a PDF download when it finishes. **Scan Impact** reads that downloaded report back in and explains, with evidence, what the scan found and (given a later report) what changed. See [Scan Impact Analysis](#scan-impact-analysis).
 6. **Idea path.** Elephant asks one question at a time. When the idea is clear, it runs the brainstorm, drafts the design document section by section and sends it to independent Goldfish reviewers. You decide what happens to each finding.
 
 The top bar stays the same everywhere. **Home** returns to the two starting points, **Discover** and **Operate** open those pages, and the project name has **Switch project** under it. Switch project lists all your projects with the active one first and has a **Create a new project** panel on the right.
@@ -252,6 +253,45 @@ The pipeline asks the app before each AI call and reports the tokens used after 
 The app signs each job with an **Ed25519** private key, and the worker holds only the public key. A leaked worker configuration therefore cannot be used to create jobs. Every token names its run and its scope (dispatch or callback) and expires after six hours, so a callback for one run cannot change another run.
 
 The pipeline was written to upload results to S3. Instead of requiring MinIO or a cloud bucket, the app serves a small S3-compatible endpoint itself, checks the **AWS Signature V4** on every upload and writes the objects to `.data/scan-artifacts/`. The signing keys are created once under `.data/` with file mode 600 and reused, so a running worker keeps working after the app restarts.
+
+## Scan Impact Analysis
+
+The **Scan Impact** tab reads a downloaded report back in and explains what the scan found, with the evidence for each statement. Given a second report from a later scan, it also shows what changed. It never starts a scan and never writes to the database or the artifact store.
+
+```mermaid
+flowchart TD
+    U([Upload the report PDF or its .md,<br/>optionally a later report too]) --> H[Browser computes SHA-256<br/>the PDF never leaves the machine]
+    H --> M{Matches a report this<br/>project's scans produced?}
+    M -->|yes| E[Read that scan's stored evidence:<br/>report markdown, findings register,<br/>opengrep.json, codeql.sarif,<br/>remediation plan, coverage gaps]
+    M -->|no, .md| P[Parse the markdown on its own<br/>less evidence, said on the page]
+    M -->|no, PDF| X[Refused: a PDF cannot be read reliably<br/>without its stored scan]
+    E --> A[Analysis by fixed rules, no AI]
+    P --> A
+    A --> R{Second report?}
+    R -->|no| S[State at scan time:<br/>detected, fix proposed, dismissed]
+    R -->|yes| C[Compare by pipeline fingerprint:<br/>no longer reported, still reported,<br/>partly addressed, new]
+    S --> O([Nine-section report, charts,<br/>evidence per finding, Export PDF])
+    C --> O
+```
+
+**How a report is read.** The browser hashes the uploaded file and sends only the hash for a PDF (a Markdown report is sent as text). The server compares it with the PDFs and `SECURITY_ASSESSMENT_REPORT.md` files of the project's scans. A match means the upload is byte-for-byte the report ADIS produced, so that scan's stored outputs are used as evidence. A Markdown report that matches no scan is parsed from its own sections and its Appendix A table; code snippets, scanner CWE tags and the remediation plan are then unavailable, and the page says so.
+
+**What a single report can show.** One report shows the state at scan time: what was detected, how the report assessed each finding, which fix the remediation roadmap proposes for it, and which findings were dismissed as false positives and why. It does not show that anything was fixed, and the analysis never says so.
+
+**What a second report adds.** Findings are matched by the pipeline's fingerprint (or by scanner, file, line and rule for a Markdown report read on its own). Each finding from the first report gets one status:
+
+| Status | Meaning |
+| --- | --- |
+| No longer reported (verified by re-scan) | The same scanner ran on a newer commit and did not report it. |
+| Still reported | The later report contains it. A change of severity is shown, with a note when only the report's assessment changed and the scanner's level did not. |
+| Not reported, same commit | Both reports scanned the same commit, so no code changed; the difference comes from the scan itself. |
+| Not re-checked | The scanner that found it did not run in the later scan. |
+
+Findings that only the later report contains are listed as new. A remediation group (a roadmap fix covering several findings) is partly addressed when some of its findings are no longer reported and others remain. A **verified remediation percentage** is shown only when both reports state their commits, the commits differ, the later report is newer and every scanner that found an actionable issue ran again; otherwise the page says which condition is missing.
+
+**What the reports cannot show.** ADIS reports contain no code diffs, so an applied fix is never asserted: the before code comes from the scanner output, and the after code only exists where the later scan still reports the finding. CodeQL output carries no code snippets. The report PDFs contain no screenshots; the small images Chromium embeds for colour emoji are counted separately and not treated as screenshots.
+
+**The generated report** has nine sections: executive summary, initial security posture, key findings, before vs after comparison, remediation analysis, evidence, security impact, remaining risks and conclusion. It shows metric tiles, charts of findings by assessment, scanner and CWE, and every finding as an expandable panel with its location, CWE identifiers and names, scanner and rule, the flagged code, the report passage that assessed it, and the fix or dismissal the report gave. **Export PDF** opens the browser's print dialog with every finding expanded and a light print layout; choose *Save as PDF*.
 
 ## The Docker scan worker
 
@@ -502,6 +542,7 @@ All routes are under `/api`, return JSON unless noted and are limited to the sig
 | `GET /api/projects/{id}/scans/{runId}` | One run with its stage and recent logs. |
 | `GET /api/projects/{id}/scans/{runId}/findings` | De-duplicated findings with their assessments and counts. |
 | `GET /api/projects/{id}/scans/{runId}/report` | The PDF report. |
+| `POST /api/projects/{id}/impact/analyze` | Scan Impact Analysis. Body `{before, after?}`, each `{name, kind: "pdf", sha256}` or `{name, kind: "md", text}`. Matches each report to this project's scans and returns the analysis. Read only. |
 
 The worker uses `/scan-worker/*` for logs, heartbeats, AI metering and the final result, authenticated with the run's signed token. Uploads go to `/adis-scan-artifacts/*` with AWS Signature V4. Neither is meant for direct use.
 
@@ -562,6 +603,7 @@ worker/
   index.js            API routes, repository logic and the embedded single-page app
   auth.js             accounts, sessions and password hashing
   scan.js             scan control plane, worker callbacks, S3 store, report matching
+  impact.js           Scan Impact Analysis: reads a downloaded report back in (read only)
   egm.js              Elephant–Goldfish workflow steps
   egm-personas.js     prompts for Elephant, the lenses and the reviewers
   idea-execution.js   durable, idempotent model calls

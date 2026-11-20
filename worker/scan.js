@@ -376,7 +376,7 @@ export function assessFindings(markdown, entries) {
 // The pipeline's de-duplicated findings register, written on its success path.
 // When the run stops before that (for example the AI report step fails), the
 // pipeline has still saved its fingerprinted baseline snapshot of every finding.
-async function findingsFor(env, run) {
+export async function findingsFor(env, run) {
   const outputs = parseJson(run.raw_outputs_json, []);
   const register = outputs.find((item) => item.filename === 'findings-register.json' || String(item.s3Key || '').endsWith('/findings-register.json'));
   const registerFile = register ? await env.SCAN_STORE.get(register.s3Key) : null;
