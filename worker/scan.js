@@ -20,7 +20,7 @@ const KNOWN_SCANNERS = ['codeql', 'opengrep', 'sonarqube', 'dependency-track', '
 const DEFAULT_SCANNERS = ['codeql', 'opengrep', 'trivy', 'trufflehog'];
 const HEARTBEAT_TIMEOUT_MS = 10 * 60 * 1000;
 const RUN_TOKEN_TTL_S = 6 * 60 * 60;
-const DEFAULT_AI_BUDGET_USD = 2;
+const DEFAULT_AI_BUDGET_USD = 3;
 const DEFAULT_OPENAI_MODEL = 'gpt-5';
 const STAGES = new Set(['verify', 'setup', 'clone', 'scan', 'coverage', 'claude', 'pdf', 'upload', 'complete', 'failed', 'cleanup']);
 

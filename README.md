@@ -245,7 +245,7 @@ Scanners report many items that are not real problems in context. For that reaso
 
 ### AI cost limit
 
-The pipeline asks the app before each AI call and reports the tokens used after it. The app keeps an estimated running cost for the scan and refuses new calls once it reaches `SCAN_AI_BUDGET_USD` (default `$2`). A call already in progress can go slightly past the limit. With `SCAN_AI_MODEL=gpt-5-mini`, a scan of a small-to-medium repository has cost about $0.15. The estimated cost of every run is shown on the Operate page.
+The pipeline asks the app before each AI call and reports the tokens used after it. The app keeps an estimated running cost for the scan and refuses new calls once it reaches `SCAN_AI_BUDGET_USD` (default `$3`). A call already in progress can go slightly past the limit. With `SCAN_AI_MODEL=gpt-5-mini`, a scan of a small-to-medium repository has cost about $0.15. The estimated cost of every run is shown on the Operate page.
 
 ### Why the scan link is built this way
 
@@ -274,7 +274,7 @@ Then add the scan settings to `.env` and restart the app:
 ```bash
 SCAN_AI_API_KEY=...
 SCAN_AI_MODEL=gpt-5-mini
-SCAN_AI_BUDGET_USD=2
+SCAN_AI_BUDGET_USD=3
 ```
 
 ### How the image is built
@@ -550,7 +550,7 @@ The worker uses `/scan-worker/*` for logs, heartbeats, AI metering and the final
 | `SCAN_AI_API_KEY` | unset | Key for the scan report. Scans are disabled until it is set. |
 | `SCAN_AI_PROVIDER` | `openai-codex` | Report agent used by the pipeline. |
 | `SCAN_AI_MODEL` | pipeline default (`gpt-5`) | Report model. `gpt-5-mini` costs about a fifth as much. |
-| `SCAN_AI_BUDGET_USD` | `2` | Estimated AI spend allowed per scan. |
+| `SCAN_AI_BUDGET_USD` | `3` | Estimated AI spend allowed per scan. |
 | `SCAN_SCANNERS` | `codeql,opengrep,trivy,trufflehog` | Scanners to run. Optional: `osv`, `sonarqube`, `dependency-track`, `bom-cyclonedx`, `nuclei`, `zap`. |
 | `SCAN_WORKER_URL` | `http://127.0.0.1:4101` | Address of the scan worker. |
 | `SCAN_WORKER_IMAGE` | `security-audit-worker` | Docker image name used by the `scan-worker:*` scripts. |

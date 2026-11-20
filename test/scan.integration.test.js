@@ -347,19 +347,19 @@ test("worker callbacks require the run's own signed token", async () => {
     const begin = await post("/scan-worker/hub/adis/ai-metering/begin", first.jobToken);
     const granted = await begin.json();
     assert.match(granted.invocationId, /^[0-9a-f-]{36}$/);
-    assert.equal(granted.maxBudgetUsd, 2, "the default per-scan budget");
+    assert.equal(granted.maxBudgetUsd, 3, "the default per-scan budget");
     // Reported usage is tallied; once the estimate reaches the budget, further AI calls are refused.
     assert.equal((await post(`/scan-worker/hub/adis/llm-invocations/${granted.invocationId}/finish`, first.jobToken, { inputTokens: 100000, cacheReadTokens: 400000, outputTokens: 50000, modelUsed: "gpt-5-mini" })).status, 200);
     let usage = (await call(`/api/projects/${projectId}/scans/${first.runId}`)).body.run.ai_usage;
-    assert.deepEqual({ ...usage, cost_usd: Number(usage.cost_usd.toFixed(4)) }, { input_tokens: 100000, cached_tokens: 400000, output_tokens: 50000, cost_usd: 0.135, budget_usd: 2 });
-    await post(`/scan-worker/hub/adis/llm-invocations/x/finish`, first.jobToken, { inputTokens: 0, outputTokens: 200000, modelUsed: "gpt-5" });
+    assert.deepEqual({ ...usage, cost_usd: Number(usage.cost_usd.toFixed(4)) }, { input_tokens: 100000, cached_tokens: 400000, output_tokens: 50000, cost_usd: 0.135, budget_usd: 3 });
+    await post(`/scan-worker/hub/adis/llm-invocations/x/finish`, first.jobToken, { inputTokens: 0, outputTokens: 300000, modelUsed: "gpt-5" });
     const refused = await post("/scan-worker/hub/adis/ai-metering/begin", first.jobToken);
     assert.equal(refused.status, 403);
     const refusal = await refused.json();
     assert.equal(refusal.governanceBlocked, true);
-    assert.match(refusal.message, /AI budget reached: .*\$2\.1[34] of its \$2\.00 limit/);
+    assert.match(refusal.message, /AI budget reached: .*\$3\.1[34] of its \$3\.00 limit/);
     usage = (await call(`/api/projects/${projectId}/scans/${first.runId}`)).body.run.ai_usage;
-    assert.equal(Number(usage.cost_usd.toFixed(3)), 2.135);
+    assert.equal(Number(usage.cost_usd.toFixed(3)), 3.135);
     assert.equal((await nativeFetch(origin + "/scan-worker/hub/adis/prompts/assembly", { headers: { authorization: `Bearer ${first.jobToken}` } })).status, 404);
   });
 });
