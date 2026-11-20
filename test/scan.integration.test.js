@@ -429,3 +429,38 @@ test("a rule named in words counts only where the finding's file is named, and e
   ]);
   assert.deepEqual(out.map((item) => `${item.id}:${item.assessment}`), ["C1:false-positive", "C2:hardening", "C3:not-in-report"]);
 });
+
+test("a finding card that cites the file and line counts in its severity section, not only where the rule id appears", async () => {
+  const { assessFindings } = await import("../worker/scan.js");
+  // Shape of a real report: the Medium card describes the rule in words and cites file:lines;
+  // only the later Hardening section names the rule id.
+  const rule = "yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag";
+  const report = [
+    "## 6. High Findings",
+    "There are no confirmed high-severity findings in this run.",
+    "## 7. Medium Findings",
+    "### 7.1 Mutable GitHub Actions tags in CI workflow",
+    "- File: `.github/workflows/ci.yml:23,24,42,43,57-58`",
+    "OpenGrep flagged six usages of mutable GitHub Actions tags.",
+    "### 7.2 Raw query in the store",
+    "- File: `src/store.py` (lines 40, 41)",
+    "Rule: `python.sqlalchemy.security.sqlalchemy-execute-raw-query`",
+    "## 11. Infrastructure & Hardening Recommendations",
+    "### 11.1 CI Supply-Chain — Mutable Action Tags (OpenGrep)",
+    `- Rule: \`${rule}\``,
+    "- Affected file: `.github/workflows/ci.yml` (lines 23,24,42,43,57,58)",
+    "## 12. False Positives",
+  ].join("\n");
+  const out = assessFindings(report, [
+    { id: "OG-005", ruleId: rule, filePath: ".github/workflows/ci.yml", startLine: 23 },
+    { id: "OG-010", ruleId: rule, filePath: ".github/workflows/ci.yml", startLine: 58 },
+    { id: "OG-011", ruleId: rule, filePath: ".github/workflows/ci.yml", startLine: 90 },
+    { id: "CQ-001", ruleId: "py/cyclic-import", filePath: "src/store.py", startLine: 40 },
+  ]);
+  assert.deepEqual(out.map((item) => `${item.id}:${item.assessment}`), [
+    "OG-005:medium", // cited by file and line in the Medium card
+    "OG-010:medium", // inside the cited range 57-58
+    "OG-011:hardening", // line not cited in Medium; the rule id still places it under Hardening
+    "CQ-001:not-in-report", // same file and line, but the card names a different rule
+  ]);
+});

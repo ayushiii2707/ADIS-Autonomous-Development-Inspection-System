@@ -321,10 +321,33 @@ function rowCoversLine(text, line) {
   return line >= from && line <= (to ?? from);
 }
 
+// A finding card that cites the finding's file together with its line, as
+// `path:23,24,42-43` or `path` (lines 23, 24), points at that finding even when it
+// describes the rule only in words.
+function citesFileLine(text, filePath, line) {
+  if (!filePath || !line) return false;
+  const cite = new RegExp(`${escapeRegExp(filePath)}\`?(?::|\\s*\\(?\\s*lines?\\s+)(\\d+(?:\\s*[-–,]\\s*\\d+)*)`, 'gi');
+  for (const match of text.matchAll(cite)) {
+    for (const part of match[1].split(',')) {
+      const [from, to] = part.match(/\d+/g).map(Number);
+      if (line >= from && line <= (to ?? from)) return true;
+    }
+  }
+  return false;
+}
+
 export function assessFindings(markdown, entries) {
   const report = String(markdown || '');
   const knownFiles = [...new Set(entries.map((entry) => entry.filePath).filter(Boolean))];
+  const knownRules = [...new Set(entries.map((entry) => entry.ruleId).filter(Boolean))];
   const sections = REPORT_SECTIONS.map(([assessment, title]) => ({ assessment, units: reportUnits(reportSection(report, title)) }));
+  // A card that names a different rule (another finding's rule id, or its own `Rule:` field)
+  // is about that rule, so it does not claim this finding by location.
+  const namesOtherRule = (text, ruleId) => {
+    if (knownRules.some((rule) => rule !== ruleId && mentionsRule(text, rule))) return true;
+    const stated = [...text.matchAll(/\*{0,2}Rule:?\*{0,2}:?\s*(?:<\/strong>)?\s*`?([\w./-]+)/gi)].map((match) => match[1]);
+    return stated.length > 0 && !stated.some((value) => mentionsRule(value, ruleId) || mentionsRule(ruleId, value));
+  };
   const matches = (entry, { text, row }, byName) => {
     const namesFile = entry.filePath && text.includes(entry.filePath);
     if (byName) {
@@ -332,13 +355,15 @@ export function assessFindings(markdown, entries) {
       if (!namesFile || !describesRule(text, entry.ruleId)) return false;
     } else {
       if (entry.id && new RegExp(`(?<![\\w-])${escapeRegExp(entry.id)}(?![\\w-])`).test(text)) return true;
+      // File and line cited together identify the finding, unless the card names another rule.
+      if (!row && citesFileLine(text, entry.filePath, Number(entry.startLine)) && !namesOtherRule(text, entry.ruleId)) return true;
       if (!mentionsRule(text, entry.ruleId)) return false;
       if (!namesFile && knownFiles.some((file) => text.includes(file))) return false;
     }
     return !row || rowCoversLine(text, Number(entry.startLine));
   };
   return entries.map((entry) => {
-    // Exact references (finding id or rule id) win over rules described in words.
+    // Exact references (finding id, rule id, or file with line) win over rules described in words.
     for (const byName of [false, true]) {
       for (const { assessment, units } of sections) {
         if (units.some((unit) => matches(entry, unit, byName))) return { ...entry, assessment };
